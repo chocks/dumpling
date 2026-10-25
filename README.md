@@ -15,9 +15,15 @@ destination, and a safety check before it writes anything.
 It does **not** create schema (the destination tables must already exist) and
 it is not a guarantee of anonymity: review your columns with `dumpling scan`.
 
+## Install
+
+```bash
+cargo install dumpling-cli     # installs the `dumpling` binary (Rust 1.94+)
+```
+
 ## Quick start
 
-Needs Rust and Docker.
+The demo below needs Rust and Docker. It builds from source.
 
 ```bash
 cargo build --release
@@ -83,6 +89,7 @@ Exit codes: `0` ok, `3` config, `4` safety, `5` database, `6` validation, `1` in
 
 - [Configuration, transforms, safety and limitations](docs/CONFIGURATION.md)
 - [How it works](docs/ARCHITECTURE.md)
+- [Releasing](docs/RELEASING.md)
 - [Status and what is verified](docs/PROGRESS.md)
 
 ## Development

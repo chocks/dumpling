@@ -1,10 +1,22 @@
 [package]
-name = "dumpling"
+# `dumpling` is taken on crates.io; the binary and library are still `dumpling`.
+name = "dumpling-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.94"
 description = "Copy MySQL databases into local environments while anonymizing sensitive data"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/chocks/dumpling"
+homepage = "https://github.com/chocks/dumpling"
+keywords = ["mysql", "anonymization", "database", "sync", "cli"]
+categories = ["command-line-utilities", "database"]
+# Keep the published crate small: no CI, fixtures-as-docker, or docs site files.
+exclude = [".github/", "docker/", "docker-compose.yml", "docs/", ".dumpling.yml"]
+
+[lib]
+name = "dumpling"
+path = "src/lib.rs"
 
 [[bin]]
 name = "dumpling"
