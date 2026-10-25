@@ -60,6 +60,11 @@ integration tests call it.
   `DELETE` (children first), then loads parents first. Any error rolls
   everything back. This is atomic for InnoDB only; DDL and non-transactional
   engines (MyISAM) cannot be rolled back.
+* **Pipeline**: a reader (fetch + transform) and a writer (insert) run
+  concurrently in one task (`tokio::join!`) joined by a bounded channel of 2
+  batches, so network, CPU and database work overlap while memory stays at a few
+  batches. The destination commits only if *both* sides succeed; a read failure
+  after some batches were written rolls everything back (tested).
 * **Paging**: keyset pagination on the primary key (or the first unique index
   whose columns are all `NOT NULL`): `WHERE (k1,k2) > (?,?) ORDER BY k1,k2 LIMIT n`.
   Memory is bounded by `batch_size`. Key columns cannot be transformed.

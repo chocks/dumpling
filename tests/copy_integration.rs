@@ -363,3 +363,28 @@ async fn excluded_parent_is_reported_not_silently_skipped() {
     assert!(err.contains("users"), "{err}");
     assert!(ids(&fx.dst, "orders").await.is_empty());
 }
+
+/// The source read fails after earlier batches were already inserted. The
+/// destination must not commit those batches.
+#[tokio::test]
+async fn read_failure_midway_commits_nothing() {
+    let schema = "CREATE TABLE t (id INT PRIMARY KEY, v VARCHAR(20)) ENGINE=InnoDB;";
+    let seed = "SET SESSION cte_max_recursion_depth = 2000; \
+                INSERT INTO t WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i < 1500) \
+                SELECT i, 'x' FROM n;";
+    let Some(fx) = Fixture::with_schema("readfail", schema, seed).await else {
+        return;
+    };
+    // The filter is fine for ids <= 1000 and raises "Invalid JSON text" after that.
+    let yaml = fx.yaml(
+        "  batch_size: 250",
+        "mode: merge\ntables:\n  t:\n    where: \"id <= 1000 OR JSON_EXTRACT(CONCAT('{bad', id), '$') IS NOT NULL\"\n",
+    );
+    let err = fx.sync(&yaml, false, false).await.unwrap_err().to_string();
+    assert!(err.contains("reading `t` failed"), "{err}");
+    assert_eq!(
+        count(&fx.dst, "SELECT COUNT(*) FROM t").await,
+        0,
+        "batches written before the failure must roll back"
+    );
+}

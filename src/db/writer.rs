@@ -72,10 +72,12 @@ pub fn build_insert_sql(table: &TableInfo, columns: &[&str], rows: usize, upsert
 pub async fn insert_rows(
     conn: &mut MySqlConnection,
     table: &TableInfo,
-    columns: &[&str],
+    columns: &[String],
     rows: &[Vec<TransformedValue>],
     upsert: bool,
 ) -> Result<()> {
+    let columns: Vec<&str> = columns.iter().map(String::as_str).collect();
+    let columns = columns.as_slice();
     validate_ident(&table.name)?;
     for c in columns {
         validate_ident(c)?;
