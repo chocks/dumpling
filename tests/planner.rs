@@ -111,9 +111,9 @@ fn schema() -> SchemaSnapshot {
             unique_indexes: vec![],
             foreign_keys: vec![ForeignKey {
                 constraint_name: "fk".into(),
-                column_name: "user_id".into(),
+                columns: vec!["user_id".into()],
                 referenced_table: "users".into(),
-                referenced_column: "id".into(),
+                referenced_columns: vec!["id".into()],
             }],
             auto_increment: Some("id".into()),
         },
@@ -195,4 +195,69 @@ fn rejects_null_on_not_null_column() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("NOT NULL"));
+}
+
+#[test]
+fn parent_filter_becomes_child_semi_join() {
+    let mut tables = IndexMap::new();
+    tables.insert(
+        "users".into(),
+        TableConfig {
+            r#where: Some("status = 'active'".into()),
+            ..Default::default()
+        },
+    );
+    tables.insert("orders".into(), TableConfig::default());
+    let plan = build_plan(
+        &base_resolved(tables),
+        &schema(),
+        &TransformRegistry::with_builtins(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.effective_where["users"].as_deref(),
+        Some("(status = 'active')")
+    );
+    assert_eq!(
+        plan.effective_where["orders"].as_deref(),
+        Some("(`user_id`) IN (SELECT `id` FROM `users` WHERE (status = 'active'))")
+    );
+}
+
+#[test]
+fn unfiltered_parent_adds_no_child_constraint() {
+    let mut tables = IndexMap::new();
+    tables.insert("orders".into(), TableConfig::default());
+    let plan = build_plan(
+        &base_resolved(tables),
+        &schema(),
+        &TransformRegistry::with_builtins(),
+    )
+    .unwrap();
+    assert_eq!(plan.effective_where["orders"], None);
+}
+
+#[test]
+fn rejects_foreign_key_cycles() {
+    let mut s = schema();
+    // users -> orders makes users <-> orders a cycle.
+    s.tables
+        .get_mut("users")
+        .unwrap()
+        .foreign_keys
+        .push(ForeignKey {
+            constraint_name: "fk_back".into(),
+            columns: vec!["order_id".into()],
+            referenced_table: "orders".into(),
+            referenced_columns: vec!["id".into()],
+        });
+    let mut tables = IndexMap::new();
+    tables.insert("orders".into(), TableConfig::default());
+    let err = build_plan(
+        &base_resolved(tables),
+        &s,
+        &TransformRegistry::with_builtins(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("cycle"), "{err}");
 }

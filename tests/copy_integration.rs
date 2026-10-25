@@ -1,0 +1,311 @@
+//! Phase 2: the copy engine against real MySQL (docker compose).
+
+mod common;
+use common::*;
+
+const ALL_TYPES: &str = r#"
+CREATE TABLE all_types (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  c_tiny TINYINT, c_utiny TINYINT UNSIGNED, c_small SMALLINT, c_med MEDIUMINT UNSIGNED,
+  c_int INT, c_big BIGINT, c_ubig BIGINT UNSIGNED,
+  c_dec DECIMAL(30,10), c_float FLOAT, c_double DOUBLE,
+  c_char CHAR(8), c_varchar VARCHAR(255), c_text TEXT, c_longtext LONGTEXT,
+  c_bin BINARY(4), c_varbin VARBINARY(64), c_blob BLOB, c_longblob LONGBLOB,
+  c_json JSON, c_date DATE, c_dt DATETIME(6), c_ts TIMESTAMP(3) NULL, c_time TIME(3),
+  c_year YEAR, c_bit BIT(12), c_enum ENUM('a','b','c'), c_set SET('x','y','z'), c_bool BOOLEAN
+) ENGINE=InnoDB;
+"#;
+
+const ALL_TYPES_SEED: &str = r#"
+INSERT INTO all_types VALUES
+ (1, -128, 255, -32768, 16777215, -2147483648, -9223372036854775808, 18446744073709551615,
+  12345678901234567890.1234567891, 1.5, 3.141592653589793,
+  'abc', 'héllo 🥟 wörld', 'some text', REPEAT('x', 100000),
+  X'00FF10AB', X'000102030405FF', X'0000FFFF', X'DEADBEEF00BEEF',
+  '{"a": [1, 2, {"b": null}], "unicode": "🥟"}', '2024-02-29', '2024-02-29 23:59:59.123456',
+  '2024-02-29 23:59:59.123', '-838:59:59.000', 2155, b'101010101010', 'c', 'x,z', TRUE),
+ (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+ (3, 0, 0, 0, 0, 0, 0, 0, 0.0000000001, 0, 0, '', '', '', '', X'00000000', X'', X'', X'',
+  'null', '1000-01-01', '1000-01-01 00:00:00', '1970-01-01 00:00:01', '00:00:00', 1901,
+  b'0', 'a', '', FALSE);
+"#;
+
+#[tokio::test]
+async fn copies_every_mysql_type_without_loss() {
+    let Some(fx) = Fixture::with_schema("types", ALL_TYPES, ALL_TYPES_SEED).await else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  all_types: {}\n");
+    let summary = fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(summary.tables, vec![("all_types".to_string(), 3)]);
+    assert_eq!(
+        dump(&fx.src, "all_types", "id").await,
+        dump(&fx.dst, "all_types", "id").await
+    );
+}
+
+const FK_SCHEMA: &str = r#"
+CREATE TABLE users (id BIGINT UNSIGNED PRIMARY KEY, status VARCHAR(16) NOT NULL) ENGINE=InnoDB;
+CREATE TABLE orders (id BIGINT UNSIGNED PRIMARY KEY, user_id BIGINT UNSIGNED NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users (id)) ENGINE=InnoDB;
+CREATE TABLE order_items (id BIGINT UNSIGNED PRIMARY KEY, order_id BIGINT UNSIGNED NOT NULL,
+  FOREIGN KEY (order_id) REFERENCES orders (id)) ENGINE=InnoDB;
+CREATE TABLE notes (id BIGINT UNSIGNED PRIMARY KEY, order_id BIGINT UNSIGNED NULL,
+  FOREIGN KEY (order_id) REFERENCES orders (id)) ENGINE=InnoDB;
+CREATE TABLE regions (country CHAR(2) NOT NULL, code CHAR(3) NOT NULL, active TINYINT NOT NULL,
+  PRIMARY KEY (country, code)) ENGINE=InnoDB;
+CREATE TABLE stores (id INT PRIMARY KEY, country CHAR(2) NOT NULL, code CHAR(3) NOT NULL,
+  FOREIGN KEY (country, code) REFERENCES regions (country, code)) ENGINE=InnoDB;
+"#;
+
+const FK_SEED: &str = r#"
+INSERT INTO users VALUES (1, 'active'), (2, 'deleted');
+INSERT INTO orders VALUES (10, 1), (11, 2);
+INSERT INTO order_items VALUES (100, 10), (101, 11);
+INSERT INTO notes VALUES (1, 10), (2, 11), (3, NULL);
+INSERT INTO regions VALUES ('US', 'CA', 1), ('US', 'NY', 0), ('DE', 'BE', 1);
+INSERT INTO stores VALUES (1, 'US', 'CA'), (2, 'US', 'NY'), (3, 'DE', 'BE');
+"#;
+
+#[tokio::test]
+async fn parent_filters_propagate_so_children_never_dangle() {
+    let Some(fx) = Fixture::with_schema("fkfilter", FK_SCHEMA, FK_SEED).await else {
+        return;
+    };
+    let yaml = fx.yaml(
+        "  batch_size: 1",
+        r#"
+mode: merge
+tables:
+  users: { where: "status = 'active'" }
+  orders: {}
+  order_items: {}
+  notes: {}
+  regions: { where: "active = 1" }
+  stores: {}
+"#,
+    );
+    fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(ids(&fx.dst, "users").await, vec![1]);
+    assert_eq!(ids(&fx.dst, "orders").await, vec![10]);
+    assert_eq!(ids(&fx.dst, "order_items").await, vec![100]);
+    // Nullable FK: NULL references are always valid and must be kept.
+    assert_eq!(ids(&fx.dst, "notes").await, vec![1, 3]);
+    // Composite FK.
+    assert_eq!(ids(&fx.dst, "stores").await, vec![1, 3]);
+}
+
+const ITEMS: &str =
+    "CREATE TABLE items (id INT PRIMARY KEY, name VARCHAR(20), qty INT) ENGINE=InnoDB;";
+
+#[tokio::test]
+async fn replace_failure_rolls_back_destination() {
+    let src = format!(
+        "{ITEMS} INSERT INTO items VALUES (1,'a',1),(2,'b',2),(3,'c',3),(4,'d',4),(5,'e',500);"
+    );
+    let dst = "CREATE TABLE items (id INT PRIMARY KEY, name VARCHAR(20), qty INT, CHECK (qty < 100)) \
+               ENGINE=InnoDB; INSERT INTO items VALUES (100,'old',1),(101,'old',2);";
+    let Some(fx) = Fixture::new("rollback", &src, dst).await else {
+        return;
+    };
+    let yaml = fx.yaml("  batch_size: 2", "mode: replace\ntables:\n  items: {}\n");
+    let err = fx.sync(&yaml, true, false).await.unwrap_err();
+    assert!(err.to_string().contains("items"), "{err}");
+    assert_eq!(
+        ids(&fx.dst, "items").await,
+        vec![100, 101],
+        "must roll back"
+    );
+}
+
+#[tokio::test]
+async fn replace_requires_force() {
+    let Some(fx) =
+        Fixture::with_schema("noforce", ITEMS, "INSERT INTO items VALUES (1,'a',1);").await
+    else {
+        return;
+    };
+    sqlx::query("INSERT INTO items VALUES (9,'keep',9)")
+        .execute(&fx.dst)
+        .await
+        .unwrap();
+    let yaml = fx.yaml("", "mode: replace\ntables:\n  items: {}\n");
+    assert!(fx.sync(&yaml, false, false).await.is_err());
+    assert_eq!(ids(&fx.dst, "items").await, vec![9]);
+}
+
+#[tokio::test]
+async fn merge_upserts_and_keeps_other_rows() {
+    let Some(fx) = Fixture::with_schema(
+        "merge",
+        ITEMS,
+        "INSERT INTO items VALUES (1,'new1',1),(2,'new2',2);",
+    )
+    .await
+    else {
+        return;
+    };
+    sqlx::query("INSERT INTO items VALUES (1,'old1',0),(99,'keep',9)")
+        .execute(&fx.dst)
+        .await
+        .unwrap();
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  items: {}\n");
+    fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(ids(&fx.dst, "items").await, vec![1, 2, 99]);
+    assert_eq!(
+        count(
+            &fx.dst,
+            "SELECT COUNT(*) FROM items WHERE id = 1 AND name = 'new1'"
+        )
+        .await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn auto_increment_continues_after_copy() {
+    let schema =
+        "CREATE TABLE t (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(10)) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::with_schema(
+        "autoinc",
+        schema,
+        "INSERT INTO t VALUES (1,'a'),(2,'b'),(500,'c');",
+    )
+    .await
+    else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  t: {}\n");
+    fx.sync(&yaml, false, false).await.unwrap();
+    sqlx::query("INSERT INTO t (name) VALUES ('new')")
+        .execute(&fx.dst)
+        .await
+        .unwrap();
+    assert_eq!(ids(&fx.dst, "t").await, vec![1, 2, 500, 501]);
+}
+
+#[tokio::test]
+async fn pages_large_tables_with_composite_keys() {
+    let schema = "CREATE TABLE big (a INT NOT NULL, b INT NOT NULL, v VARCHAR(20), \
+                  PRIMARY KEY (a, b)) ENGINE=InnoDB;";
+    let seed = "SET SESSION cte_max_recursion_depth = 10000; \
+                INSERT INTO big WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i < 5000) \
+                SELECT i % 7, i, CONCAT('v', i) FROM n;";
+    let Some(fx) = Fixture::with_schema("big", schema, seed).await else {
+        return;
+    };
+    let yaml = fx.yaml("  batch_size: 300", "mode: merge\ntables:\n  big: {}\n");
+    let s = fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(s.tables, vec![("big".to_string(), 5000)]);
+    assert_eq!(
+        dump(&fx.src, "big", "a, b").await,
+        dump(&fx.dst, "big", "a, b").await
+    );
+}
+
+#[tokio::test]
+async fn wide_tables_stay_under_the_placeholder_limit() {
+    let cols: Vec<String> = (0..150).map(|i| format!("c{i} INT")).collect();
+    let schema = format!(
+        "CREATE TABLE wide (id INT PRIMARY KEY, {}) ENGINE=InnoDB;",
+        cols.join(", ")
+    );
+    let vals: Vec<String> = (0..150).map(|_| "i".to_string()).collect();
+    let seed = format!(
+        "INSERT INTO wide WITH RECURSIVE n AS (SELECT 1 i UNION ALL SELECT i+1 FROM n WHERE i < 700) \
+         SELECT i, {} FROM n;",
+        vals.join(", ")
+    );
+    let Some(fx) = Fixture::with_schema("wide", &schema, &seed).await else {
+        return;
+    };
+    // 700 rows x 151 columns = 105,700 placeholders in one statement (> 65,535).
+    let yaml = fx.yaml("  batch_size: 700", "mode: merge\ntables:\n  wide: {}\n");
+    fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(count(&fx.dst, "SELECT COUNT(*) FROM wide").await, 700);
+}
+
+#[tokio::test]
+async fn copies_only_shared_columns_and_warns() {
+    let src = "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(10), extra VARCHAR(10)) ENGINE=InnoDB; \
+               INSERT INTO t VALUES (1,'a','secret');";
+    let dst =
+        "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(10), only_dst INT NULL) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::new("shared", src, dst).await else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  t: {}\n");
+    fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(ids(&fx.dst, "t").await, vec![1]);
+}
+
+#[tokio::test]
+async fn rejects_missing_destination_table_before_writing() {
+    let Some(fx) = Fixture::new(
+        "nodsttable",
+        &format!("{ITEMS} INSERT INTO items VALUES (1,'a',1);"),
+        "CREATE TABLE other (id INT PRIMARY KEY);",
+    )
+    .await
+    else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  items: {}\n");
+    let err = fx.sync(&yaml, false, false).await.unwrap_err();
+    assert!(err.to_string().contains("items"));
+}
+
+#[tokio::test]
+async fn refuses_when_source_and_destination_are_the_same_database() {
+    let Some(fx) = Fixture::with_schema("same", ITEMS, "INSERT INTO items VALUES (1,'a',1);").await
+    else {
+        return;
+    };
+    // Two differently named connections that point at the same database.
+    let yaml = format!(
+        r#"
+version: 1
+connections:
+  a: {{ url: "{u}" }}
+  b: {{ url: "{u}", allow_destination: true }}
+source: a
+destination: b
+mode: replace
+tables:
+  items: {{}}
+"#,
+        u = fx.src_url
+    );
+    let err = fx.sync(&yaml, true, false).await.unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("same"), "{err}");
+    assert_eq!(
+        ids(&fx.src, "items").await,
+        vec![1],
+        "source must be untouched"
+    );
+}
+
+#[tokio::test]
+async fn dry_run_reports_exact_row_counts_and_modifies_nothing() {
+    let schema = "CREATE TABLE items (id BIGINT UNSIGNED PRIMARY KEY, name VARCHAR(20), qty INT) \
+                  ENGINE=InnoDB; CREATE TABLE plain (id BIGINT UNSIGNED PRIMARY KEY) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::with_schema(
+        "dry",
+        schema,
+        "INSERT INTO items VALUES (1,'a',1),(2,'b',2),(3,'c',3); INSERT INTO plain VALUES (1),(2),(3),(4);",
+    )
+    .await
+    else {
+        return;
+    };
+    let yaml = fx.yaml(
+        "",
+        "mode: replace\ntables:\n  items: { where: \"qty > 1\" }\n  plain: {}\n",
+    );
+    let s = fx.sync(&yaml, true, true).await.unwrap();
+    assert!(s.dry_run);
+    assert_eq!(s.estimated_rows["items"], Some(2));
+    assert_eq!(s.estimated_rows["plain"], Some(4));
+    assert_eq!(count(&fx.dst, "SELECT COUNT(*) FROM items").await, 0);
+}

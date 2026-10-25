@@ -20,6 +20,30 @@ pub struct TableInfo {
     pub auto_increment: Option<String>,
 }
 
+impl TableInfo {
+    /// Columns used for keyset pagination: the primary key, else the first
+    /// unique index whose columns are all NOT NULL.
+    pub fn page_key(&self) -> Option<Vec<String>> {
+        if !self.primary_key.is_empty() {
+            return Some(self.primary_key.clone());
+        }
+        self.unique_indexes
+            .iter()
+            .find(|idx| {
+                idx.iter().all(|c| {
+                    self.columns
+                        .iter()
+                        .any(|col| col.name == *c && !col.is_nullable)
+                })
+            })
+            .cloned()
+    }
+
+    pub fn column(&self, name: &str) -> Option<&ColumnInfo> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ColumnInfo {
     pub name: String,
@@ -34,9 +58,9 @@ pub struct ColumnInfo {
 #[derive(Debug, Clone)]
 pub struct ForeignKey {
     pub constraint_name: String,
-    pub column_name: String,
+    pub columns: Vec<String>,
     pub referenced_table: String,
-    pub referenced_column: String,
+    pub referenced_columns: Vec<String>,
 }
 
 pub async fn introspect(pool: &MySqlPool) -> Result<SchemaSnapshot> {
@@ -185,16 +209,29 @@ pub async fn introspect(pool: &MySqlPool) -> Result<SchemaSnapshot> {
     .await
     .map_err(|e| DumplingError::Database(format!("list foreign keys failed: {e}")))?;
 
+    // Rows arrive ordered by (table, constraint, ordinal): one FK may span
+    // several consecutive rows (composite keys).
+    let mut last: Option<(String, String)> = None;
     for row in fk_rows {
         let table: String = row.try_get("TABLE_NAME").map_err(db_err)?;
-        let fk = ForeignKey {
-            constraint_name: row.try_get("CONSTRAINT_NAME").map_err(db_err)?,
-            column_name: row.try_get("COLUMN_NAME").map_err(db_err)?,
-            referenced_table: row.try_get("REFERENCED_TABLE_NAME").map_err(db_err)?,
-            referenced_column: row.try_get("REFERENCED_COLUMN_NAME").map_err(db_err)?,
+        let constraint: String = row.try_get("CONSTRAINT_NAME").map_err(db_err)?;
+        let column: String = row.try_get("COLUMN_NAME").map_err(db_err)?;
+        let ref_column: String = row.try_get("REFERENCED_COLUMN_NAME").map_err(db_err)?;
+        let Some(info) = tables.get_mut(&table) else {
+            continue;
         };
-        if let Some(info) = tables.get_mut(&table) {
-            info.foreign_keys.push(fk);
+        if last.as_ref() == Some(&(table.clone(), constraint.clone())) {
+            let fk = info.foreign_keys.last_mut().expect("fk started");
+            fk.columns.push(column);
+            fk.referenced_columns.push(ref_column);
+        } else {
+            info.foreign_keys.push(ForeignKey {
+                constraint_name: constraint.clone(),
+                columns: vec![column],
+                referenced_table: row.try_get("REFERENCED_TABLE_NAME").map_err(db_err)?,
+                referenced_columns: vec![ref_column],
+            });
+            last = Some((table, constraint));
         }
     }
 

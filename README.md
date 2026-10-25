@@ -79,7 +79,7 @@ Default file: `.dumpling.yml` (see `.dumpling.example.yml`).
 |-----|---------|
 | `version` | Must be `1` |
 | `defaults.batch_size` | Keyset page size (default 2000) |
-| `defaults.jobs` | Reserved for future parallel table copy (default 4) |
+| `defaults.jobs` | Accepted but currently unused — copying is sequential (one snapshot, one transaction) |
 | `defaults.anonymize` | Apply column transforms |
 | `defaults.safe_destination` | Require `allow_destination: true` |
 | `defaults.deterministic` | Stable replacements via HMAC identity map |
@@ -131,16 +131,19 @@ Prefer TLS for remote URLs. Dumpling uses SQLx rustls; certificate verification 
 ## Performance
 
 - Tune `defaults.batch_size` (1000–5000 is a common range).
-- Prefer primary-key keyset pagination (tables without PK/unique keys are rejected).
+- Tables are paged by primary key (or a NOT NULL unique index); tables with neither are rejected.
 - Filters use administrator SQL in `WHERE`; keep them sargable when possible.
 
 ## MySQL limitations
 
 - Schema must exist on the destination beforehand.
-- FK cycles are reported; load order may need deferred constraints (not auto-disabled).
-- `TRUNCATE` is avoided in favor of `DELETE` for replace mode to play nicer with FKs.
-- Mixed engines / DDL break transaction assumptions — Dumpling does not promise a single atomic snapshot restore.
-- Tables without a primary or unique key are unsupported.
+- FK cycles and self-referencing tables are rejected (Dumpling loads parents before children and never disables FK checks).
+- `replace` uses `DELETE` (not `TRUNCATE`) so it is transactional; the whole run is one destination transaction, atomic for InnoDB only.
+- Source reads use one read-only consistent snapshot, so all tables are copied as of the same instant.
+- Only columns present on both sides are copied (missing ones are skipped with a warning).
+- Spatial column types are unsupported. Tables without a primary / NOT NULL unique key are unsupported.
+- A filter on a parent table also restricts its children (so no dangling foreign keys).
+- Database error messages are reduced to the MySQL error code because they can contain row values; use `-vv` for the full text.
 
 ## Testing
 
@@ -156,7 +159,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Integration tests in `tests/mysql_integration.rs` skip cleanly if MySQL URLs are unset or unreachable.
+Integration tests (`tests/copy_integration.rs`) create their own databases on the compose servers (root account, test-only) and **fail** if MySQL is unreachable. Set `DUMPLING_SKIP_INTEGRATION=1` to skip them on purpose.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and [docs/PROGRESS.md](docs/PROGRESS.md) for what is verified.
 
 ## Roadmap
 

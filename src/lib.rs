@@ -7,6 +7,7 @@ pub mod error;
 pub mod planner;
 pub mod progress;
 pub mod safety;
+pub mod sync;
 pub mod transform;
 
 pub mod cli;

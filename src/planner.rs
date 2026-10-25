@@ -1,5 +1,6 @@
-use crate::config::{ResolvedConfig, TableConfig};
+use crate::config::ResolvedConfig;
 use crate::db::introspect::SchemaSnapshot;
+use crate::db::value::quote_ident;
 use crate::error::{DumplingError, Result};
 use crate::transform::TransformRegistry;
 use indexmap::IndexMap;
@@ -13,7 +14,9 @@ pub struct SyncPlan {
     pub cycles: Vec<Vec<String>>,
     pub missing_dependencies: Vec<String>,
     pub transform_count: usize,
-    pub table_filters: IndexMap<String, Option<String>>,
+    /// Full SQL `WHERE` body per table: its own filter plus constraints that keep
+    /// child rows from referencing parent rows that were filtered out.
+    pub effective_where: IndexMap<String, Option<String>>,
     pub estimated_rows: IndexMap<String, Option<u64>>,
     pub warnings: Vec<String>,
 }
@@ -77,14 +80,16 @@ pub fn build_plan(
             if excluded.contains(&fk.referenced_table) {
                 missing_dependencies.push(format!(
                     "{table}.{} -> {} (excluded)",
-                    fk.column_name, fk.referenced_table
+                    fk.columns.join(","),
+                    fk.referenced_table
                 ));
                 continue;
             }
             if !all_tables.contains(&fk.referenced_table) {
                 missing_dependencies.push(format!(
                     "{table}.{} -> {} (missing)",
-                    fk.column_name, fk.referenced_table
+                    fk.columns.join(","),
+                    fk.referenced_table
                 ));
                 continue;
             }
@@ -145,39 +150,37 @@ pub fn build_plan(
 
     let (load_order, cycles) = topological_sort(&expanded, schema)?;
     if !cycles.is_empty() {
-        for cycle in &cycles {
-            warnings.push(format!(
-                "foreign-key cycle detected: {} — load order may require deferred constraints",
-                cycle.join(" -> ")
-            ));
-        }
+        return Err(DumplingError::Validation(format!(
+            "foreign-key cycle (including self-references) among: {}. \
+             Dumpling loads parents before children and cannot order these tables yet; \
+             exclude one of them or break the cycle in the destination",
+            cycles[0].join(", ")
+        )));
     }
 
-    // Tables without a usable key for keyset pagination.
     for t in &load_order {
         if let Some(info) = schema.tables.get(t)
-            && info.primary_key.is_empty()
-            && info.unique_indexes.is_empty()
+            && info.page_key().is_none()
         {
             return Err(DumplingError::Validation(format!(
-                "table `{t}` has no primary key or unique index; \
-                     Dumpling requires a stable unique key for batched copies"
+                "table `{t}` has no primary key or NOT NULL unique index; \
+                 Dumpling needs a stable key to copy in batches"
             )));
         }
     }
 
-    let mut selected_tables: Vec<String> = expanded.into_iter().collect();
+    let mut selected_tables: Vec<String> = expanded.iter().cloned().collect();
     selected_tables.sort();
 
-    let mut table_filters = IndexMap::new();
+    let own: HashMap<&str, &str> = resolved
+        .config
+        .tables
+        .iter()
+        .filter_map(|(t, c)| c.filter().map(|f| (t.as_str(), f)))
+        .collect();
+    let mut effective_where = IndexMap::new();
     for t in &selected_tables {
-        let filter = resolved
-            .config
-            .tables
-            .get(t)
-            .and_then(TableConfig::filter)
-            .map(str::to_string);
-        table_filters.insert(t.clone(), filter);
+        effective_where.insert(t.clone(), effective_filter(t, schema, &expanded, &own));
     }
 
     Ok(SyncPlan {
@@ -187,10 +190,64 @@ pub fn build_plan(
         cycles,
         missing_dependencies,
         transform_count,
-        table_filters,
+        effective_where,
         estimated_rows: IndexMap::new(),
         warnings,
     })
+}
+
+/// A table's own filter AND, for every selected parent that is itself
+/// restricted, a semi-join so a child row is only copied if its parent row is.
+/// Nullable FK columns are exempt when NULL (MySQL does not check them).
+fn effective_filter(
+    table: &str,
+    schema: &SchemaSnapshot,
+    selected: &HashSet<String>,
+    own: &HashMap<&str, &str>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(f) = own.get(table) {
+        parts.push(format!("({f})"));
+    }
+    let info = schema.tables.get(table)?;
+    for fk in &info.foreign_keys {
+        let parent = &fk.referenced_table;
+        // Cycles were rejected earlier, so this recursion terminates.
+        if !selected.contains(parent) {
+            continue;
+        }
+        let Some(parent_where) = effective_filter(parent, schema, selected, own) else {
+            continue;
+        };
+        let q = |cols: &[String]| {
+            cols.iter()
+                .map(|c| quote_ident(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let semi = format!(
+            "({}) IN (SELECT {} FROM {} WHERE {parent_where})",
+            q(&fk.columns),
+            q(&fk.referenced_columns),
+            quote_ident(parent)
+        );
+        let null_guards: Vec<String> = fk
+            .columns
+            .iter()
+            .filter(|c| info.column(c).is_some_and(|c| c.is_nullable))
+            .map(|c| format!("{} IS NULL", quote_ident(c)))
+            .collect();
+        parts.push(if null_guards.is_empty() {
+            semi
+        } else {
+            format!("({} OR {semi})", null_guards.join(" OR "))
+        });
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" AND "))
+    }
 }
 
 fn validate_filter_expression(table: &str, filter: &str) -> Result<()> {
@@ -243,7 +300,7 @@ fn topological_sort(
     for t in selected {
         if let Some(info) = schema.tables.get(t) {
             for fk in &info.foreign_keys {
-                if selected.contains(&fk.referenced_table) && fk.referenced_table != *t {
+                if selected.contains(&fk.referenced_table) {
                     // Edge: parent -> child (parent must load first)
                     deps.entry(fk.referenced_table.clone())
                         .or_default()
@@ -303,44 +360,23 @@ fn topological_sort(
     Ok((order, cycles))
 }
 
+/// Exact per-table row counts, using the same filters the copy will use.
 pub async fn estimate_rows(pool: &crate::db::MySqlPool, plan: &mut SyncPlan) -> Result<()> {
     for table in &plan.load_order {
-        let filter = plan.table_filters.get(table).and_then(|f| f.as_ref());
-        let count = match filter {
-            Some(f) => {
-                crate::db::writer::validate_ident(table)?;
-                let sql = format!(
-                    "SELECT COUNT(*) FROM `{}` WHERE {}",
-                    table.replace('`', "``"),
-                    f
-                );
-                let (n,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
-                    .fetch_one(pool)
-                    .await
-                    .map_err(|e| {
-                        DumplingError::Database(format!(
-                            "count for `{table}` failed (check where clause): {e}"
-                        ))
-                    })?;
-                Some(n as u64)
-            }
-            None => {
-                // Approximate via information_schema for speed; exact COUNT(*) optional later.
-                let (n,): (Option<i64>,) = sqlx::query_as(
-                    r#"
-                    SELECT TABLE_ROWS
-                    FROM information_schema.TABLES
-                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
-                    "#,
-                )
-                .bind(table)
-                .fetch_one(pool)
-                .await
-                .map_err(|e| DumplingError::Database(format!("estimate `{table}` failed: {e}")))?;
-                n.map(|v| v.max(0) as u64)
-            }
-        };
-        plan.estimated_rows.insert(table.clone(), count);
+        crate::db::writer::validate_ident(table)?;
+        let mut sql = format!("SELECT COUNT(*) FROM {}", quote_ident(table));
+        if let Some(Some(f)) = plan.effective_where.get(table) {
+            sql.push_str(&format!(" WHERE {f}"));
+        }
+        let (n,): (i64,) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .fetch_one(pool)
+            .await
+            .map_err(|e| {
+                DumplingError::Database(format!(
+                    "counting `{table}` failed (check its where clause): {e}"
+                ))
+            })?;
+        plan.estimated_rows.insert(table.clone(), Some(n as u64));
     }
     Ok(())
 }
@@ -348,7 +384,7 @@ pub async fn estimate_rows(pool: &crate::db::MySqlPool, plan: &mut SyncPlan) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Connection, Defaults, DestinationMode};
+    use crate::config::{Config, Connection, Defaults, DestinationMode, TableConfig};
     use crate::db::introspect::{ColumnInfo, ForeignKey, TableInfo};
     use std::path::PathBuf;
 
@@ -403,9 +439,9 @@ mod tests {
                 unique_indexes: vec![],
                 foreign_keys: vec![ForeignKey {
                     constraint_name: "fk_orders_user".into(),
-                    column_name: "user_id".into(),
+                    columns: vec!["user_id".into()],
                     referenced_table: "users".into(),
-                    referenced_column: "id".into(),
+                    referenced_columns: vec!["id".into()],
                 }],
                 auto_increment: Some("id".into()),
             },

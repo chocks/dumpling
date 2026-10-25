@@ -56,7 +56,9 @@ pub fn apply(
             })?;
             Ok(yaml_to_value(v)?)
         }
-        TransformKind::Preserve => Ok(TransformedValue::Preserve),
+        TransformKind::Preserve => Ok(original
+            .map(|o| TransformedValue::Text(o.to_string()))
+            .unwrap_or(TransformedValue::Null)),
         TransformKind::Hash => {
             let material = original.unwrap_or("");
             let digest = ctx.hex_digest(material);
@@ -73,7 +75,7 @@ pub fn apply(
     }
 }
 
-fn yaml_to_value(v: &serde_yaml::Value) -> Result<TransformedValue> {
+pub fn yaml_to_value(v: &serde_yaml::Value) -> Result<TransformedValue> {
     match v {
         serde_yaml::Value::Null => Ok(TransformedValue::Null),
         serde_yaml::Value::Bool(b) => Ok(TransformedValue::Bool(*b)),

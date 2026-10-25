@@ -1,9 +1,8 @@
 use dumpling::cli::{Cli, Commands};
 use dumpling::config::{self, Config, DEFAULT_CONFIG_FILE, find_config};
-use dumpling::copy::CopyEngine;
 use dumpling::db;
 use dumpling::error::{DumplingError, ExitCode, Result};
-use dumpling::planner::{build_plan, estimate_rows};
+use dumpling::planner::build_plan;
 use dumpling::progress::Reporter;
 use dumpling::safety::assert_destination_writable;
 use dumpling::transform::{TransformRegistry, scan_column_name};
@@ -206,49 +205,6 @@ async fn cmd_sync(
 ) -> Result<()> {
     let reporter = Reporter::new(quiet);
     let resolved = load_resolved(path, env.as_deref(), tables, group, force, dry_run).await?;
-    let registry = TransformRegistry::with_builtins();
-
-    reporter.banner(&resolved);
-    assert_destination_writable(&resolved)?;
-
-    reporter.planning_start();
-    let source = db::mysql::connect(&resolved.source_url, "source").await?;
-    let dest = db::mysql::connect(&resolved.dest_url, "destination").await?;
-    let schema = db::introspect::introspect(&source).await?;
-
-    let dest_schema = db::introspect::introspect(&dest).await?;
-    let mut plan = build_plan(&resolved, &schema, &registry)?;
-    for t in &plan.selected_tables {
-        if !dest_schema.tables.contains_key(t) {
-            return Err(DumplingError::Validation(format!(
-                "destination schema `{}` is missing table `{t}` — \
-                 Dumpling copies data only; create matching schema first",
-                dest_schema.database
-            )));
-        }
-    }
-
-    if let Err(e) = estimate_rows(&source, &mut plan).await {
-        tracing::warn!("row estimation skipped: {e}");
-    }
-
-    reporter.plan_summary(&plan);
-
-    if dry_run {
-        reporter.success(true);
-        return Ok(());
-    }
-
-    let engine = CopyEngine {
-        resolved: &resolved,
-        source: &source,
-        dest: &dest,
-        source_schema: &schema,
-        plan: &plan,
-        registry: &registry,
-        reporter: &reporter,
-    };
-    engine.run().await?;
-    reporter.success(false);
+    dumpling::sync::run_sync(&resolved, &reporter).await?;
     Ok(())
 }

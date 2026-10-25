@@ -100,7 +100,7 @@ impl Reporter {
                 .map(|n| format!("  (~{} rows)", format_count(n)))
                 .unwrap_or_default();
             let filter = plan
-                .table_filters
+                .effective_where
                 .get(t)
                 .and_then(|f| f.as_ref())
                 .map(|_| "  [filtered]")

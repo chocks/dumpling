@@ -17,9 +17,6 @@ pub enum TransformedValue {
     Float(f64),
     Text(String),
     Bytes(Vec<u8>),
-    /// Pass-through of an already-safe SQL expression fragment for source-side transforms.
-    /// Only used for documented source-side cases; never built from untrusted input.
-    Preserve,
 }
 
 #[derive(Debug, Clone)]

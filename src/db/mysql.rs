@@ -16,6 +16,16 @@ pub async fn connect(url: &str, label: &str) -> Result<MySqlPool> {
     MySqlPoolOptions::new()
         .max_connections(8)
         .acquire_timeout(Duration::from_secs(15))
+        // Fixed session time zone so TIMESTAMP values round-trip identically
+        // regardless of either server's default zone.
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET time_zone = '+00:00'")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect_with(opts)
         .await
         .map_err(|e| {
