@@ -13,7 +13,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,13 +34,41 @@ jobs:
         if: failure()
         run: docker compose logs
 
-  # The oldest Rust we claim to support (rust-version in Cargo.toml).
-  msrv:
-    runs-on: ubuntu-latest
+  # Preview of the next runner image (ubuntu-latest moves to 26.04 in Nov 2026).
+  # Never blocks a PR; a failure here is a heads-up before we move the pin.
+  test-ubuntu-26:
+    runs-on: ubuntu-26.04
+    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # 1.94
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Start MySQL
+        run: docker compose up -d --wait
+      - run: cargo test --locked
+      - name: MySQL logs on failure
+        if: failure()
+        run: docker compose logs
+
+  # The oldest Rust we claim to support (rust-version in Cargo.toml).
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The version comes from `toolchain`, not from the pinned SHA, so
+      # Dependabot bumping the SHA cannot change which Rust this tests.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
+        with:
+          toolchain: "1.94"
+      - name: Toolchain must match rust-version in Cargo.toml
+        run: |
+          want=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          rustc --version
+          rustc --version | grep -q "^rustc ${want}\." \
+            || { echo "expected Rust ${want}.x"; exit 1; }
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo check --locked --all-targets
