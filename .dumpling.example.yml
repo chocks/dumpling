@@ -19,7 +19,6 @@ defaults:
   # Prefer the DUMPLING_TRANSFORM_SECRET environment variable over putting a
   # secret in this file. (Avoid ${...} placeholders in comments — they are
   # interpolated everywhere in the file.)
-  deterministic: true
 
 connections:
   production:

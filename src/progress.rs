@@ -97,7 +97,7 @@ impl Reporter {
                 .estimated_rows
                 .get(t)
                 .and_then(|v| *v)
-                .map(|n| format!("  (~{} rows)", format_count(n)))
+                .map(|n| format!("  ({} rows)", format_count(n)))
                 .unwrap_or_default();
             let filter = plan
                 .effective_where

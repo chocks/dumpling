@@ -55,12 +55,10 @@ pub struct Defaults {
     pub safe_destination: bool,
     #[serde(default = "default_true")]
     pub preserve_auto_increment: bool,
-    /// Secret used for deterministic keyed transforms (HMAC). Prefer env var.
+    /// Secret for keyed transforms (HMAC). Prefer the DUMPLING_TRANSFORM_SECRET env var.
+    /// Unset: a random secret is generated per run (outputs differ between runs).
     #[serde(default)]
     pub transform_secret: Option<String>,
-    /// When true, identical source values map to identical replacements.
-    #[serde(default = "default_true")]
-    pub deterministic: bool,
 }
 
 impl Default for Defaults {
@@ -72,7 +70,6 @@ impl Default for Defaults {
             safe_destination: true,
             preserve_auto_increment: true,
             transform_secret: None,
-            deterministic: true,
         }
     }
 }
@@ -133,45 +130,48 @@ impl TableConfig {
     }
 }
 
+/// One column rule. The transform options sit next to `transform:`:
+/// `dob: { transform: random_date, min: "1980-01-01", max: "2000-12-31" }`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct ColumnConfig {
+    #[serde(flatten)]
     pub transform: TransformSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum TransformSpec {
-    Named(String),
-    Detailed {
-        #[serde(rename = "transform")]
-        name: String,
-        #[serde(default)]
-        value: Option<serde_yaml::Value>,
-        #[serde(default)]
-        min: Option<String>,
-        #[serde(default)]
-        max: Option<String>,
-    },
+#[serde(deny_unknown_fields)]
+pub struct TransformSpec {
+    #[serde(rename = "transform")]
+    pub name: String,
+    /// `constant`: the replacement value.
+    #[serde(default)]
+    pub value: Option<serde_yaml::Value>,
+    /// `random_date`: inclusive bounds, `YYYY-MM-DD`.
+    #[serde(default)]
+    pub min: Option<String>,
+    #[serde(default)]
+    pub max: Option<String>,
 }
 
 impl TransformSpec {
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Named(n) => n,
-            Self::Detailed { name, .. } => name,
+    pub fn named(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            value: None,
+            min: None,
+            max: None,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn constant_value(&self) -> Option<&serde_yaml::Value> {
-        match self {
-            Self::Detailed { value, .. } => value.as_ref(),
-            Self::Named(_) => None,
-        }
+        self.value.as_ref()
     }
 }
 
-/// Resolved runtime settings after applying CLI overrides.
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
     pub config: Config,

@@ -17,7 +17,7 @@ use crate::db::writer;
 use crate::error::{DumplingError, Result};
 use crate::planner::SyncPlan;
 use crate::progress::Reporter;
-use crate::transform::{TransformContext, TransformRegistry, TransformedValue};
+use crate::transform::{TransformContext, TransformKind, TransformRegistry, TransformedValue};
 use sqlx::{AssertSqlSafe, MySqlConnection};
 use std::time::Instant;
 
@@ -42,7 +42,6 @@ enum ColumnSource {
     Transform {
         select: String,
         spec: crate::config::TransformSpec,
-        scope: String,
     },
 }
 
@@ -51,22 +50,19 @@ impl CopyEngine<'_> {
         if self.resolved.dry_run {
             return Ok(vec![]);
         }
-        let mut ctx = TransformContext::new(
-            self.resolved.config.defaults.deterministic,
-            self.resolved
-                .config
-                .defaults
-                .transform_secret
-                .as_deref()
-                .unwrap_or("dumpling-dev-insecure-secret-change-me"),
-        );
-        if self.resolved.config.defaults.transform_secret.is_none() && self.plan.transform_count > 0
-        {
-            tracing::warn!(
-                "DUMPLING_TRANSFORM_SECRET not set; using insecure built-in secret — \
-                 set a strong secret for deterministic anonymization"
-            );
-        }
+        let mut ctx = match self.resolved.config.defaults.transform_secret.as_deref() {
+            Some(secret) => TransformContext::new(secret),
+            None => {
+                if self.plan.transform_count > 0 {
+                    tracing::warn!(
+                        "no transform secret set: using a random one for this run, so \
+                         replacements will differ between runs. Set DUMPLING_TRANSFORM_SECRET \
+                         for stable output"
+                    );
+                }
+                TransformContext::random()
+            }
+        };
 
         self.reporter.copying_start();
 
@@ -149,30 +145,26 @@ impl CopyEngine<'_> {
                 .and_then(|c| c.columns.get(&col.name))
                 .map(|c| &c.transform)
                 .filter(|_| anonymize);
-            let source = match spec {
-                None => {
-                    let (select, kind) = value::read_plan(col)
-                        .map_err(|e| DumplingError::Validation(format!("`{table}`: {e}")))?;
+            let kind = spec.map(|s| self.registry.kind(s)).transpose()?;
+            let read = || {
+                value::read_plan(col)
+                    .map_err(|e| DumplingError::Validation(format!("`{table}`: {e}")))
+            };
+            let source = match (spec, kind) {
+                (None, _) | (_, Some(TransformKind::Preserve)) => {
+                    let (select, kind) = read()?;
                     ColumnSource::Read { select, kind }
                 }
-                Some(spec) if spec.name() == "preserve" => {
-                    let (select, kind) = value::read_plan(col)?;
-                    ColumnSource::Read { select, kind }
-                }
-                Some(spec) if spec.name().eq_ignore_ascii_case("null") => {
-                    ColumnSource::Fixed(TransformedValue::Null)
-                }
-                Some(spec) if spec.name() == "constant" => {
-                    let v = spec.constant_value().ok_or_else(|| {
+                (_, Some(TransformKind::Null)) => ColumnSource::Fixed(TransformedValue::Null),
+                (Some(spec), Some(TransformKind::Constant)) => ColumnSource::Fixed(
+                    crate::transform::yaml_to_value(spec.constant_value().ok_or_else(|| {
                         DumplingError::Validation("transform `constant` requires `value`".into())
-                    })?;
-                    ColumnSource::Fixed(crate::transform::yaml_to_value(v)?)
-                }
-                Some(spec) => ColumnSource::Transform {
+                    })?)?,
+                ),
+                (Some(spec), _) => ColumnSource::Transform {
                     select: value::text_expr(col)
                         .map_err(|e| DumplingError::Validation(format!("`{table}`: {e}")))?,
                     spec: spec.clone(),
-                    scope: format!("{table}.{}", col.name),
                 },
             };
             if key.contains(&col.name) && !matches!(source, ColumnSource::Read { .. }) {
@@ -321,8 +313,7 @@ impl CopyEngine<'_> {
                         ColumnSource::Read { kind, .. } => {
                             value::read_cell(row, slot[i].unwrap(), *kind)?
                         }
-                        ColumnSource::Transform { spec, scope, .. } => {
-                            ctx.scope = scope.clone();
+                        ColumnSource::Transform { spec, .. } => {
                             let raw = match value::read_cell(row, slot[i].unwrap(), Kind::Text)? {
                                 TransformedValue::Text(t) => Some(t),
                                 _ => None,

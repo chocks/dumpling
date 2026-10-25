@@ -16,7 +16,6 @@ chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
 console = "0.16.6"
 dotenvy = "0.15.7"
-fake = { version = "5.1.0", features = ["derive"] }
 hex = "0.4.3"
 hmac = "0.13.0"
 indexmap = { version = "2.14.2", features = ["serde"] }

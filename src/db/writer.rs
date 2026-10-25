@@ -116,9 +116,12 @@ pub fn redact_db_error(e: &sqlx::Error) -> String {
     match e {
         sqlx::Error::Database(d) => {
             tracing::debug!("full database error: {d}");
+            let number = d
+                .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                .map(|m| m.number().to_string())
+                .unwrap_or_else(|| "?".into());
             format!(
-                "MySQL error {} (message withheld, it may contain row data; use -vv to see it)",
-                d.code().as_deref().unwrap_or("?")
+                "MySQL error {number} (message withheld, it may contain row data; use -vv to see it)"
             )
         }
         other => other.to_string(),

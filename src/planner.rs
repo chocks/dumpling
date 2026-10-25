@@ -2,7 +2,7 @@ use crate::config::ResolvedConfig;
 use crate::db::introspect::SchemaSnapshot;
 use crate::db::value::quote_ident;
 use crate::error::{DumplingError, Result};
-use crate::transform::TransformRegistry;
+use crate::transform::{TransformKind, TransformRegistry, check_column};
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -114,7 +114,7 @@ pub fn build_plan(
         )));
     }
 
-    // Validate transforms against registry and nullability.
+    // Validate transforms: known, well-formed, and able to work on their column.
     let mut transform_count = 0usize;
     for (table_name, table_cfg) in &resolved.config.tables {
         if !expanded.contains(table_name) {
@@ -122,18 +122,22 @@ pub fn build_plan(
         }
         let info = schema.tables.get(table_name);
         for (col_name, col_cfg) in &table_cfg.columns {
-            registry.validate_spec(&col_cfg.transform)?;
+            let spec = &col_cfg.transform;
+            let kind = registry.kind(spec)?;
+            registry.validate_spec(spec)?;
             transform_count += 1;
-            if (col_cfg.transform.name() == "null" || col_cfg.transform.name() == "NULL")
-                && let Some(info) = info
-                && let Some(col) = info.columns.iter().find(|c| c.name == *col_name)
-                && !col.is_nullable
-            {
+            let col = info.and_then(|i| i.column(col_name)).ok_or_else(|| {
+                DumplingError::Validation(format!(
+                    "`{table_name}.{col_name}` has a transform but the column does not exist"
+                ))
+            })?;
+            if kind == TransformKind::Null && !col.is_nullable {
                 return Err(DumplingError::Validation(format!(
                     "transform `null` on `{table_name}.{col_name}` but column is NOT NULL"
                 )));
             }
-            if col_cfg.transform.name() == "preserve" {
+            check_column(kind, table_name, col)?;
+            if kind == TransformKind::Preserve {
                 warnings.push(format!(
                     "`{table_name}.{col_name}` uses transform `preserve` — raw value retained"
                 ));

@@ -6,7 +6,6 @@ defaults:
   anonymize: true
   safe_destination: true
   preserve_auto_increment: true
-  deterministic: true
 
 connections:
   production:

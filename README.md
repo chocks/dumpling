@@ -2,175 +2,99 @@
 
 **Copy production. Lose the secrets. Keep the bugs.**
 
-Dumpling is a Rust CLI that copies MySQL databases into local development environments while anonymizing sensitive data. It is inspired by the configuration-driven workflow of [`ankane/pgsync`](https://github.com/ankane/pgsync), targeting MySQL first.
+Dumpling copies a MySQL database into a local one and anonymizes sensitive
+columns on the way. It follows the workflow of
+[pgsync](https://github.com/ankane/pgsync): a config file, a source, a
+destination, and a safety check before it writes anything.
 
-## What it does
+- Copies selected tables, with row filters that keep foreign keys valid
+- Replaces emails, names, phones, addresses, dates; nulls out secrets
+- Reads in bounded batches from one consistent snapshot; writes in one transaction
+- Refuses to write to production-looking or unapproved destinations
 
-- Copies selected tables and filtered rows from a source MySQL database to a destination
-- Anonymizes configured columns during transfer (with source-side nulling/constants when possible)
-- Preserves primary keys and foreign-key load order
-- Streams rows in bounded batches (keyset pagination)
-- Refuses writes to production-marked or unsafe destinations (`--force` cannot override this)
-
-## What it does **not** do
-
-- Migrate or invent schema/DDL — destination tables must already exist
-- Claim that hashing alone is anonymization
-- Guarantee cross-engine transactional atomicity on MySQL
-- Automatically discover every sensitive column (use `scan` + review)
-- Support engines other than MySQL/MariaDB yet
-
-## Install (development)
-
-```bash
-# Rust stable (1.85+ recommended; tested on 1.99)
-cargo build --release
-./target/release/dumpling --help
-```
+It does **not** create schema (the destination tables must already exist) and
+it is not a guarantee of anonymity: review your columns with `dumpling scan`.
 
 ## Quick start
 
-```bash
-# 1. Start disposable MySQL pair
-docker compose up -d --wait
+Needs Rust and Docker.
 
-# 2. Export connection URLs (never commit passwords)
+```bash
+cargo build --release
+docker compose up -d --wait        # a source and a destination MySQL with sample data
+
 export DUMPLING_SOURCE_URL='mysql://dumpling:dumpling@127.0.0.1:33061/dumpling_src'
 export DUMPLING_DEST_URL='mysql://dumpling:dumpling@127.0.0.1:33062/dumpling_dst'
-export DUMPLING_TRANSFORM_SECRET='replace-me-with-a-long-random-secret'
-export DUMPLING_ALLOW_REPLACE=1   # only for replace mode in CI/noninteractive
+export DUMPLING_TRANSFORM_SECRET="$(openssl rand -hex 32)"
+export DUMPLING_ALLOW_REPLACE=1    # the sample config uses `mode: replace`
 
-# 3. Create config
-cargo run -- init --force
-# edit .dumpling.yml, or use tests/fixtures/dumpling.test.yml
-
-# 4. Validate & dry-run
-cargo run -- --config tests/fixtures/dumpling.test.yml validate
-cargo run -- --config tests/fixtures/dumpling.test.yml sync --dry-run
-
-# 5. Sync (replace mode requires --force + DUMPLING_ALLOW_REPLACE in CI)
-cargo run -- --config tests/fixtures/dumpling.test.yml sync --force
+alias dumpling=./target/release/dumpling
+dumpling -c tests/fixtures/dumpling.test.yml sync --dry-run   # look at the plan
+dumpling -c tests/fixtures/dumpling.test.yml sync --force     # copy
 ```
 
-## CLI
+For your own databases, run `dumpling init` and edit `.dumpling.yml`.
 
-| Command | Purpose |
-|---------|---------|
-| `dumpling init` | Write `.dumpling.yml` from the commented example |
-| `dumpling validate` | Parse config, connect, validate transforms & plan |
-| `dumpling scan` | Report configured + heuristically sensitive columns |
-| `dumpling sync` | Copy + anonymize |
-| `dumpling sync --dry-run` | Plan only — **no destination writes** |
-| `dumpling sync --tables a,b` | Restrict tables (FK deps still expanded) |
-| `dumpling sync --group customer` | Copy a named group |
-| `dumpling sync --env staging` | Select environment profile |
-| `dumpling sync --force` | Allow configured destructive `replace` (never bypasses production protection) |
-| `dumpling version` | Print version |
+## A minimal config
 
-Exit codes: `0` success, `3` config, `4` safety, `5` database, `6` validation, `1` internal.
+```yaml
+version: 1
 
-## Configuration reference
+connections:
+  production:
+    url: ${DUMPLING_SOURCE_URL}
+  local:
+    url: ${DUMPLING_DEST_URL}
+    allow_destination: true     # you confirm this is a dev database
 
-Default file: `.dumpling.yml` (see `.dumpling.example.yml`).
+source: production
+destination: local
+mode: merge                     # or `replace` (needs --force)
 
-**Precedence:** CLI flags (`--tables`, `--group`, `--env`, `--force`, `--dry-run`) override environment profile selection; table rules override defaults; missing env vars in `${VAR}` are hard errors.
+tables:
+  users:
+    where: "status != 'deleted'"
+    columns:
+      email: { transform: unique_email }
+      first_name: { transform: fake_first_name }
+      password_hash: { transform: "null" }
+  orders: {}
 
-| Key | Meaning |
-|-----|---------|
-| `version` | Must be `1` |
-| `defaults.batch_size` | Keyset page size (default 2000) |
-| `defaults.jobs` | Accepted but currently unused — copying is sequential (one snapshot, one transaction) |
-| `defaults.anonymize` | Apply column transforms |
-| `defaults.safe_destination` | Require `allow_destination: true` |
-| `defaults.deterministic` | Stable replacements via HMAC identity map |
-| `connections.*.url` | `mysql://` URL, usually `${ENV}` |
-| `connections.*.production` | Writes always refused |
-| `connections.*.allow_destination` | Explicit write opt-in |
-| `mode` | `merge` (default) or `replace` |
-| `tables.*.where` | Trusted admin SQL boolean expression |
-| `tables.*.columns.*.transform` | Transform name |
-| `exclude` | Tables never copied |
-| `groups` | Named table sets |
-| `environments` | Named source/destination pairs for `--env` |
+exclude: [audit_logs, sessions]
+```
 
-### Transforms
+Passwords stay in environment variables, never in the file.
 
-| Name | Where it runs | Notes |
-|------|---------------|-------|
-| `null` | **Source SQL** | Rejected on `NOT NULL` columns |
-| `constant` | **Source SQL** | Requires `value:` |
-| `preserve` | Source | Explicit keep — use sparingly |
-| `unique_email` | Client | RFC 2606 `.invalid` domain; stable with secret |
-| `fake_email` | Client | Reserved-domain emails |
-| `fake_first_name` / `fake_last_name` | Client | Deterministic pick from small lists |
-| `fake_phone` / `unique_phone` | Client | Synthetic `+1-555-…` |
-| `fake_address` | Client | Synthetic street lines |
-| `random_date` | Client | Deterministic date in a fixed window |
-| `hash` | Client | HMAC-SHA256 hex — **pseudonymization, not anonymization** |
+## Commands
 
-Set `DUMPLING_TRANSFORM_SECRET` for keyed deterministic transforms. Secrets are never logged.
+| Command | What it does |
+|---|---|
+| `dumpling init` | Write a commented `.dumpling.yml` |
+| `dumpling validate` | Check config, connections and the plan |
+| `dumpling scan` | List columns that look sensitive |
+| `dumpling sync` | Copy and anonymize |
+| `dumpling sync --dry-run` | Show the plan and row counts; writes nothing |
+| `dumpling sync --tables a,b` / `--group name` / `--env name` | Narrow or switch what is synced |
+| `dumpling sync --force` | Allow `mode: replace`. Never overrides production protection |
 
-## Production safety
+Exit codes: `0` ok, `3` config, `4` safety, `5` database, `6` validation, `1` internal.
 
-1. Destinations with `production: true` are **never** writable (`--force` ignored).
-2. Hostnames matching RDS/Azure/Cloud SQL/`prod` markers are classified production-like and refused.
-3. With `safe_destination: true` (default), destinations need `allow_destination: true`.
-4. `mode: replace` requires `--force`; noninteractive sessions also need `DUMPLING_ALLOW_REPLACE=1`.
-5. Dry-run never executes writes.
-6. Connection passwords and row values are redacted from logs/errors.
+## More
 
-Hostname heuristics are a backstop, not a substitute for explicit connection flags.
+- [Configuration, transforms, safety and limitations](docs/CONFIGURATION.md)
+- [How it works](docs/ARCHITECTURE.md)
+- [Status and what is verified](docs/PROGRESS.md)
 
-## Permissions
-
-- **Source:** `SELECT` on target tables + `information_schema` (prefer a read-only account).
-- **Destination:** `SELECT`, `INSERT`, `UPDATE`, `DELETE` on target tables (no need for `DROP`).
-
-Prefer TLS for remote URLs. Dumpling uses SQLx rustls; certificate verification is **not** disabled by default.
-
-## Performance
-
-- Tune `defaults.batch_size` (1000–5000 is a common range).
-- Tables are paged by primary key (or a NOT NULL unique index); tables with neither are rejected.
-- Filters use administrator SQL in `WHERE`; keep them sargable when possible.
-
-## MySQL limitations
-
-- Schema must exist on the destination beforehand.
-- FK cycles and self-referencing tables are rejected (Dumpling loads parents before children and never disables FK checks).
-- `replace` uses `DELETE` (not `TRUNCATE`) so it is transactional; the whole run is one destination transaction, atomic for InnoDB only.
-- Source reads use one read-only consistent snapshot, so all tables are copied as of the same instant.
-- Only columns present on both sides are copied (missing ones are skipped with a warning).
-- Spatial column types are unsupported. Tables without a primary / NOT NULL unique key are unsupported.
-- A filter on a parent table also restricts its children (so no dangling foreign keys).
-- Database error messages are reduced to the MySQL error code because they can contain row values; use `-vv` for the full text.
-
-## Testing
+## Development
 
 ```bash
 docker compose up -d --wait
-export DUMPLING_SOURCE_URL='mysql://dumpling:dumpling@127.0.0.1:33061/dumpling_src'
-export DUMPLING_DEST_URL='mysql://dumpling:dumpling@127.0.0.1:33062/dumpling_dst'
-export DUMPLING_TRANSFORM_SECRET='test-secret'
-export DUMPLING_ALLOW_REPLACE=1
-
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Integration tests (`tests/copy_integration.rs`) create their own databases on the compose servers (root account, test-only) and **fail** if MySQL is unreachable. Set `DUMPLING_SKIP_INTEGRATION=1` to skip them on purpose.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and [docs/PROGRESS.md](docs/PROGRESS.md) for what is verified.
-
-## Roadmap
-
-- Parallel per-table copy bounded by `jobs`
-- Structured filters (replace free-form SQL)
-- Source-side hashing for additional transforms
-- Optional schema sync / create-table mode
-- PostgreSQL engine backend
+Integration tests create their own databases on the compose servers and fail if
+MySQL is not running (`DUMPLING_SKIP_INTEGRATION=1` skips them on purpose).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

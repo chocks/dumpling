@@ -41,18 +41,32 @@ rejected; spatial types are unsupported; non-InnoDB tables are not rolled back;
 `jobs` is accepted but unused (copy is sequential to keep one snapshot and one
 transaction).
 
-## Phase 3 — Anonymization ⏳
+## Phase 3 — Anonymization ✅
 
-Transforms exist but are **not yet verified end to end**. Known defects to fix:
+Verified against MySQL 8.4 (`tests/anonymize_integration.rs`) and unit tests
+(`tests/transformations.rs`):
 
-- [ ] Missing `DUMPLING_TRANSFORM_SECRET` falls back to a hard-coded public
-      secret (pseudonyms would be reversible by dictionary). Use a random
-      per-run secret instead.
-- [ ] `unique_phone` has only 10,000 values and collides quickly.
-- [ ] Identity is scoped per `table.column`; add an explicit shared identity so
-      the same email maps consistently across tables.
-- [ ] Transform output must fit the column (length, type) — validate at plan time.
-- [ ] Tests: no source value survives in the destination; uniqueness holds.
+- [x] No original email, name, phone, password hash or date appears in any
+      destination cell (scan of every cell against 1,800 source values)
+- [x] Unique indexes hold (300 distinct emails and phones); 50,000 distinct
+      inputs give 50,000 distinct outputs for `unique_phone` / `unique_email`
+- [x] The same person gets one email in `users` and `orders` (identity is keyed
+      by transform kind, not by column)
+- [x] Same secret → same output across runs; different secret → different;
+      no secret → random per run (never a built-in secret)
+- [x] `random_date` honours `min` / `max`; bad bounds are rejected
+- [x] Transforms that cannot fit (too long, wrong type, on the paging key) are
+      rejected before any write; nothing is written
+- [x] Database errors do not echo values (only the MySQL error number)
+- [x] `anonymize: false` copies raw values
+
+Changes from Phase 1: removed the hard-coded fallback secret, fixed
+`unique_phone` collisions (10,000 values), removed the `deterministic` option
+and the `fake` crate (HMAC-derived values from small built-in lists), flattened
+column options (`dob: { transform: random_date, min: .. }`).
+
+Known limits: client-side transforms hold raw values in memory for a batch;
+`hash` needs a column of at least 64 characters.
 
 ## Phase 4 — Developer experience ⏳
 

@@ -1,13 +1,14 @@
 use crate::config::TransformSpec;
 use crate::error::{DumplingError, Result};
-use crate::transform::builtin::{self, TransformKind};
+use crate::transform::builtin::{self, Kind};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 type HmacSha256 = Hmac<Sha256>;
+type Digest = [u8; 32];
 
-/// Value after transformation — never log the inner content in diagnostics.
+/// Value after transformation. Never log the inner content.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransformedValue {
     Null,
@@ -19,101 +20,119 @@ pub enum TransformedValue {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone)]
+/// Per-run state for keyed pseudonymization.
+///
+/// Every replacement is `HMAC(secret, kind | original)` rendered into a
+/// plausible value, so the same source value always maps to the same output
+/// (across tables too, since the key is the transform kind, not the column).
+/// For `unique` kinds an output already issued to a *different* input is
+/// rejected and re-derived, so uniqueness constraints hold.
+///
+/// Memory: unique kinds remember one 32-byte digest and one output per distinct
+/// value for the length of the run. Raw source values are never retained.
 pub struct TransformContext {
-    pub deterministic: bool,
-    pub secret: Vec<u8>,
-    /// Scope key for uniqueness (e.g. table.column).
-    pub scope: String,
-    identity_cache: HashMap<(String, String), String>,
-    unique_counters: HashMap<String, u64>,
+    secret: Vec<u8>,
+    issued: HashSet<(&'static str, String)>,
+    by_input: HashMap<(&'static str, Digest), String>,
+}
+
+impl std::fmt::Debug for TransformContext {
+    // Never print the secret.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransformContext").finish_non_exhaustive()
+    }
 }
 
 impl TransformContext {
-    pub fn new(deterministic: bool, secret: impl AsRef<[u8]>) -> Self {
+    pub fn new(secret: impl AsRef<[u8]>) -> Self {
         Self {
-            deterministic,
             secret: secret.as_ref().to_vec(),
-            scope: String::new(),
-            identity_cache: HashMap::new(),
-            unique_counters: HashMap::new(),
+            issued: HashSet::new(),
+            by_input: HashMap::new(),
         }
     }
 
-    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
-        self.scope = scope.into();
-        self
+    /// A fresh random secret. Outputs are consistent within the run only.
+    pub fn random() -> Self {
+        Self::new(rand::random::<[u8; 32]>())
     }
 
-    pub fn keyed_digest(&self, material: &str) -> [u8; 32] {
+    fn digest(&self, kind: &str, attempt: u32, original: &str) -> Digest {
         let mut mac =
             HmacSha256::new_from_slice(&self.secret).expect("HMAC accepts any key length");
-        mac.update(self.scope.as_bytes());
-        mac.update(b"|");
-        mac.update(material.as_bytes());
+        mac.update(kind.as_bytes());
+        mac.update(&attempt.to_le_bytes());
+        mac.update(original.as_bytes());
         mac.finalize().into_bytes().into()
     }
 
-    pub fn hex_digest(&self, material: &str) -> String {
-        hex::encode(self.keyed_digest(material))
+    /// Deterministic replacement; collisions with other inputs are allowed.
+    pub fn pseudonym(
+        &self,
+        kind: &str,
+        original: &str,
+        render: impl Fn(&Digest) -> String,
+    ) -> String {
+        render(&self.digest(kind, 0, original))
     }
 
-    pub fn remember_identity(&mut self, kind: &str, original: &str, replacement: String) -> String {
-        let key = (kind.to_string(), original.to_string());
-        self.identity_cache
-            .entry(key)
-            .or_insert(replacement)
-            .clone()
-    }
-
-    pub fn lookup_identity(&self, kind: &str, original: &str) -> Option<String> {
-        self.identity_cache
-            .get(&(kind.to_string(), original.to_string()))
-            .cloned()
-    }
-
-    pub fn next_unique(&mut self, kind: &str) -> u64 {
-        let counter = self.unique_counters.entry(kind.to_string()).or_insert(0);
-        *counter += 1;
-        *counter
+    /// Deterministic replacement that is distinct for distinct inputs.
+    pub fn unique_pseudonym(
+        &mut self,
+        kind: &'static str,
+        original: &str,
+        render: impl Fn(&Digest) -> String,
+    ) -> String {
+        let first = self.digest(kind, 0, original);
+        if let Some(out) = self.by_input.get(&(kind, first)) {
+            return out.clone();
+        }
+        let mut digest = first;
+        let mut attempt = 0;
+        loop {
+            let out = render(&digest);
+            if self.issued.insert((kind, out.clone())) {
+                self.by_input.insert((kind, first), out.clone());
+                return out;
+            }
+            attempt += 1;
+            digest = self.digest(kind, attempt, original);
+        }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct TransformRegistry {
-    kinds: HashMap<String, TransformKind>,
+    kinds: HashMap<String, Kind>,
 }
 
 impl TransformRegistry {
     pub fn with_builtins() -> Self {
-        let mut kinds = HashMap::new();
-        for (name, kind) in builtin::builtins() {
-            kinds.insert(name.to_string(), kind);
+        Self {
+            kinds: builtin::builtins()
+                .into_iter()
+                .map(|(n, k)| (n.to_string(), k))
+                .collect(),
         }
-        Self { kinds }
+    }
+
+    pub fn kind(&self, spec: &TransformSpec) -> Result<Kind> {
+        let name = if spec.name() == "NULL" {
+            "null"
+        } else {
+            spec.name()
+        };
+        self.kinds.get(name).copied().ok_or_else(|| {
+            DumplingError::Validation(format!(
+                "unknown transform `{name}`; known: {}",
+                self.known_names().join(", ")
+            ))
+        })
     }
 
     pub fn validate_spec(&self, spec: &TransformSpec) -> Result<()> {
-        let name = spec.name();
-        if name == "null" || name == "NULL" {
-            return Ok(());
-        }
-        if !self.kinds.contains_key(name) {
-            return Err(DumplingError::Validation(format!(
-                "unknown transform `{name}`; known: {}",
-                self.known_names().join(", ")
-            )));
-        }
-        if name == "constant" && spec.constant_value().is_none() {
-            return Err(DumplingError::Validation(
-                "transform `constant` requires a `value` field".into(),
-            ));
-        }
-        if name == "preserve" {
-            // preserve on potentially sensitive columns is allowed but callers
-            // should warn; validation accepts it as an explicit choice.
-        }
-        Ok(())
+        let kind = self.kind(spec)?;
+        builtin::validate(kind, spec)
     }
 
     pub fn known_names(&self) -> Vec<&str> {
@@ -128,58 +147,6 @@ impl TransformRegistry {
         original: Option<&str>,
         ctx: &mut TransformContext,
     ) -> Result<TransformedValue> {
-        let name = if spec.name() == "NULL" {
-            "null"
-        } else {
-            spec.name()
-        };
-        let kind = if name == "null" {
-            &TransformKind::Null
-        } else {
-            self.kinds
-                .get(name)
-                .ok_or_else(|| DumplingError::Validation(format!("unknown transform `{name}`")))?
-        };
-        builtin::apply(kind, spec, original, ctx)
-    }
-
-    /// Whether this transform can be evaluated as a MySQL expression in the
-    /// SELECT list so raw values never leave the database process.
-    pub fn supports_source_side(&self, name: &str) -> bool {
-        matches!(name, "null" | "NULL" | "constant" | "preserve")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unique_email_is_stable_for_same_input() {
-        let reg = TransformRegistry::with_builtins();
-        let mut ctx = TransformContext::new(true, b"test-secret").with_scope("users.email");
-        let spec = TransformSpec::Named("unique_email".into());
-        let a = reg.apply(&spec, Some("alice@corp.com"), &mut ctx).unwrap();
-        let b = reg.apply(&spec, Some("alice@corp.com"), &mut ctx).unwrap();
-        assert_eq!(a, b);
-        if let TransformedValue::Text(email) = a {
-            assert!(
-                email.ends_with(".invalid"),
-                "expected reserved TLD, got {email}"
-            );
-            assert!(!email.contains("alice"));
-            assert!(!email.contains("corp.com"));
-        } else {
-            panic!("expected text");
-        }
-    }
-
-    #[test]
-    fn rejects_unknown_transform() {
-        let reg = TransformRegistry::with_builtins();
-        let err = reg
-            .validate_spec(&TransformSpec::Named("make_pretty".into()))
-            .unwrap_err();
-        assert!(err.to_string().contains("unknown transform"));
+        builtin::apply(self.kind(spec)?, spec, original, ctx)
     }
 }

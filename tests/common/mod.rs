@@ -32,7 +32,11 @@ static ENV: Once = Once::new();
 fn init_env() {
     ENV.call_once(|| {
         // Noninteractive second confirmation for `mode: replace`.
-        unsafe { std::env::set_var("DUMPLING_ALLOW_REPLACE", "1") };
+        unsafe {
+            std::env::set_var("DUMPLING_ALLOW_REPLACE", "1");
+            // Tests choose their own secret (or none) in the YAML.
+            std::env::remove_var("DUMPLING_TRANSFORM_SECRET");
+        }
     });
 }
 

@@ -153,7 +153,7 @@ fn plan_excludes_and_orders_by_fk() {
             columns: IndexMap::from([(
                 "password_hash".into(),
                 ColumnConfig {
-                    transform: TransformSpec::Named("null".into()),
+                    transform: TransformSpec::named("null"),
                 },
             )]),
             ..Default::default()
@@ -182,7 +182,7 @@ fn rejects_null_on_not_null_column() {
             columns: IndexMap::from([(
                 "email".into(),
                 ColumnConfig {
-                    transform: TransformSpec::Named("null".into()),
+                    transform: TransformSpec::named("null"),
                 },
             )]),
             ..Default::default()
