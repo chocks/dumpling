@@ -106,7 +106,10 @@ is safe because `replace` clears and reloads, and `merge` is an upsert.
       an MSRV (1.94) check; actions pinned to commit SHAs; Dependabot
 - [x] Release workflow publishes to crates.io from CI on a `v*` tag, in a
       protected `crates-io` environment. See `docs/RELEASING.md`
-- [ ] First publish (needs the `CARGO_REGISTRY_TOKEN` environment secret)
+- [x] First publish: `dumpling-cli` 0.0.1 is on crates.io (`cargo install dumpling-cli`
+      installs and runs)
+- [x] Runners pinned to `ubuntu-24.04`; a non-blocking `ubuntu-26.04` job previews
+      the next `ubuntu-latest`
 
 ## Open items
 

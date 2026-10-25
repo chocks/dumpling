@@ -63,6 +63,12 @@ Later upgrade: once the crate exists, switch to crates.io *Trusted Publishing*
 A published version can be yanked (`cargo yank`) but never deleted or
 overwritten, so check the dry run before tagging.
 
+## Runners
+
+Jobs are pinned to `ubuntu-24.04` so releases do not change underneath us when
+GitHub moves `ubuntu-latest`. The non-blocking `test-ubuntu-26` CI job previews
+the next image; when it is consistently green, move the pins to `ubuntu-26.04`.
+
 ## Minimum Rust version
 
 `rust-version = "1.94"` (set by sqlx 0.9). CI checks it on every push.
