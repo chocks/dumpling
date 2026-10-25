@@ -26,22 +26,35 @@ dumpling --help
 
 ## Each release
 
+`main` is protected, so the version bump goes through a pull request and the tag
+is created on `main` *after* the merge.
+
 ```bash
-# 1. bump `version` in Cargo.toml, update docs/PROGRESS.md, then:
+# 1. On a branch: bump `version` in Cargo.toml (Cargo.lock updates on build),
+#    update docs/PROGRESS.md, and check everything locally.
+git checkout -b release/v0.0.1
 cargo fmt --check && cargo clippy --all-targets -- -D warnings
 docker compose up -d --wait && cargo test
 cargo publish --dry-run          # packages and builds exactly what would ship
 
-# 2. commit, then tag and push; the Release workflow does the publish
-git commit -am "release: v0.1.0"
-git tag v0.1.0
-git push origin main --tags
+# 2. Open a PR, wait for CI, merge it.
+git commit -am "release: v0.0.1" && git push -u origin release/v0.0.1
+gh pr create --fill
+
+# 3. Tag the merged commit on main; the Release workflow does the publish.
+git checkout main && git pull
+git tag v0.0.1
+git push origin v0.0.1
 ```
+
+If a tag was pushed before the version matched, delete it and re-tag the merged
+commit (nothing is published until the workflow passes):
+`git push origin :refs/tags/v0.0.1 && git tag -d v0.0.1`, then step 3.
 
 The `Release` workflow refuses to publish if the tag does not match the
 `Cargo.toml` version, and it re-runs the full test suite against MySQL first.
 
-The workflow only publishes tags like `v0.1.0` that point at a commit on
+The workflow only publishes tags like `v0.0.1` that point at a commit on
 `main`. Actions are pinned to commit SHAs (Dependabot opens PRs to update them).
 
 Later upgrade: once the crate exists, switch to crates.io *Trusted Publishing*
