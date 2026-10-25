@@ -1,0 +1,38 @@
+[package]
+name = "dumpling"
+version = "0.1.0"
+edition = "2024"
+description = "Copy MySQL databases into local environments while anonymizing sensitive data"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "dumpling"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+console = "0.16.6"
+dotenvy = "0.15.7"
+fake = { version = "5.1.0", features = ["derive"] }
+hex = "0.4.3"
+hmac = "0.13.0"
+indexmap = { version = "2.14.2", features = ["serde"] }
+indicatif = "0.18.6"
+rand = "0.10.3"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_yaml = "0.9.34"
+sha2 = "0.11.1"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "mysql", "tls-rustls"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }

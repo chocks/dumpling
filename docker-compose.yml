@@ -1,0 +1,50 @@
+# Disposable MySQL pair for Dumpling development and integration tests.
+# Usage:
+#   docker compose up -d
+#   export DUMPLING_SOURCE_URL='mysql://dumpling:dumpling@127.0.0.1:33061/dumpling_src'
+#   export DUMPLING_DEST_URL='mysql://dumpling:dumpling@127.0.0.1:33062/dumpling_dst'
+#   cargo test
+#   cargo run -- sync --dry-run
+
+services:
+  mysql-source:
+    image: mysql:8.4
+    container_name: dumpling-mysql-source
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: dumpling_src
+      MYSQL_USER: dumpling
+      MYSQL_PASSWORD: dumpling
+    ports:
+      - "33061:3306"
+    volumes:
+      - ./docker/mysql/init-source.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  mysql-dest:
+    image: mysql:8.4
+    container_name: dumpling-mysql-dest
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: dumpling_dst
+      MYSQL_USER: dumpling
+      MYSQL_PASSWORD: dumpling
+    ports:
+      - "33062:3306"
+    volumes:
+      - ./docker/mysql/init-dest.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 3s
+      timeout: 5s
+      retries: 30

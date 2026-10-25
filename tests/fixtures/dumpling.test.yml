@@ -1,0 +1,64 @@
+version: 1
+
+defaults:
+  batch_size: 100
+  jobs: 2
+  anonymize: true
+  safe_destination: true
+  preserve_auto_increment: true
+  deterministic: true
+
+connections:
+  production:
+    url: ${DUMPLING_SOURCE_URL}
+    production: true
+
+  local:
+    url: ${DUMPLING_DEST_URL}
+    allow_destination: true
+
+source: production
+destination: local
+mode: replace
+
+tables:
+  users:
+    where: "status != 'deleted'"
+    columns:
+      email:
+        transform: unique_email
+      first_name:
+        transform: fake_first_name
+      last_name:
+        transform: fake_last_name
+      phone:
+        transform: unique_phone
+      password_hash:
+        transform: "null"
+      auth_token:
+        transform: "null"
+
+  products: {}
+
+  orders:
+    where: "created_at >= '2025-01-01'"
+
+  order_items: {}
+
+  payments:
+    columns:
+      card_number:
+        transform: "null"
+      billing_address:
+        transform: fake_address
+
+exclude:
+  - audit_logs
+  - sessions
+
+groups:
+  customer:
+    - users
+    - orders
+    - order_items
+    - products

@@ -1,0 +1,87 @@
+# Dumpling configuration
+# Copy production. Lose the secrets. Keep the bugs.
+#
+# Secrets belong in environment variables — never commit passwords.
+#   export DUMPLING_SOURCE_URL='mysql://readonly:SECRET@db.example.com:3306/app'
+#   export DUMPLING_DEST_URL='mysql://dev:SECRET@127.0.0.1:3307/app_dev'
+#   export DUMPLING_TRANSFORM_SECRET='a-long-random-secret'
+
+version: 1
+
+defaults:
+  batch_size: 2000
+  jobs: 4
+  anonymize: true
+  # Refuse writes unless the destination connection sets allow_destination: true
+  # and is not marked production.
+  safe_destination: true
+  preserve_auto_increment: true
+  # Prefer the DUMPLING_TRANSFORM_SECRET environment variable over putting a
+  # secret in this file. (Avoid ${...} placeholders in comments — they are
+  # interpolated everywhere in the file.)
+  deterministic: true
+
+connections:
+  production:
+    url: ${DUMPLING_SOURCE_URL}
+    # Writes to this connection are always refused.
+    production: true
+
+  local:
+    url: ${DUMPLING_DEST_URL}
+    # Explicit opt-in: Dumpling may write here.
+    allow_destination: true
+
+# Default connection selection (override with --env)
+source: production
+destination: local
+
+# Destination write behavior:
+#   merge   — INSERT ... ON DUPLICATE KEY UPDATE (default; safer)
+#   replace — truncate selected tables then insert (requires --force)
+mode: merge
+
+# Optional named environments for `dumpling sync --env staging`
+environments:
+  local:
+    source: production
+    destination: local
+
+tables:
+  users:
+    where: "status != 'deleted'"
+    columns:
+      email:
+        transform: unique_email
+      first_name:
+        transform: fake_first_name
+      last_name:
+        transform: fake_last_name
+      phone:
+        transform: unique_phone
+      password_hash:
+        transform: "null"
+      auth_token:
+        transform: "null"
+
+  orders:
+    where: "created_at >= '2025-01-01'"
+
+  payments:
+    columns:
+      card_number:
+        transform: "null"
+      billing_address:
+        transform: fake_address
+
+exclude:
+  - audit_logs
+  - sessions
+  - password_resets
+
+groups:
+  customer:
+    - users
+    - orders
+    - order_items
+    - products

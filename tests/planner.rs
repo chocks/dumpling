@@ -1,0 +1,198 @@
+use dumpling::config::{
+    ColumnConfig, Config, Connection, Defaults, DestinationMode, TableConfig, TransformSpec,
+};
+use dumpling::db::introspect::{ColumnInfo, ForeignKey, SchemaSnapshot, TableInfo};
+use dumpling::planner::build_plan;
+use dumpling::transform::TransformRegistry;
+use indexmap::IndexMap;
+use std::path::PathBuf;
+
+fn base_resolved(tables: IndexMap<String, TableConfig>) -> dumpling::config::ResolvedConfig {
+    let mut connections = IndexMap::new();
+    connections.insert(
+        "src".into(),
+        Connection {
+            url: "mysql://u@127.0.0.1/src".into(),
+            allow_destination: false,
+            production: true,
+        },
+    );
+    connections.insert(
+        "dst".into(),
+        Connection {
+            url: "mysql://u@127.0.0.1/dst".into(),
+            allow_destination: true,
+            production: false,
+        },
+    );
+    dumpling::config::ResolvedConfig {
+        config: Config {
+            version: 1,
+            defaults: Defaults::default(),
+            connections,
+            source: Some("src".into()),
+            destination: Some("dst".into()),
+            mode: DestinationMode::Merge,
+            tables,
+            exclude: vec!["audit_logs".into()],
+            groups: IndexMap::new(),
+            environments: IndexMap::new(),
+        },
+        source_name: "src".into(),
+        dest_name: "dst".into(),
+        source_url: "mysql://u@127.0.0.1/src".into(),
+        dest_url: "mysql://u@127.0.0.1/dst".into(),
+        mode: DestinationMode::Merge,
+        table_filter: None,
+        group: None,
+        force: false,
+        dry_run: true,
+        config_path: PathBuf::from(".dumpling.yml"),
+    }
+}
+
+fn schema() -> SchemaSnapshot {
+    let mut tables = IndexMap::new();
+    tables.insert(
+        "users".into(),
+        TableInfo {
+            name: "users".into(),
+            engine: Some("InnoDB".into()),
+            columns: vec![
+                ColumnInfo {
+                    name: "id".into(),
+                    data_type: "bigint".into(),
+                    column_type: "bigint".into(),
+                    is_nullable: false,
+                    column_default: None,
+                    extra: "auto_increment".into(),
+                    ordinal: 1,
+                },
+                ColumnInfo {
+                    name: "email".into(),
+                    data_type: "varchar".into(),
+                    column_type: "varchar(255)".into(),
+                    is_nullable: false,
+                    column_default: None,
+                    extra: String::new(),
+                    ordinal: 2,
+                },
+                ColumnInfo {
+                    name: "password_hash".into(),
+                    data_type: "varchar".into(),
+                    column_type: "varchar(255)".into(),
+                    is_nullable: true,
+                    column_default: None,
+                    extra: String::new(),
+                    ordinal: 3,
+                },
+            ],
+            primary_key: vec!["id".into()],
+            unique_indexes: vec![vec!["email".into()]],
+            foreign_keys: vec![],
+            auto_increment: Some("id".into()),
+        },
+    );
+    tables.insert(
+        "orders".into(),
+        TableInfo {
+            name: "orders".into(),
+            engine: Some("InnoDB".into()),
+            columns: vec![ColumnInfo {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                column_type: "bigint".into(),
+                is_nullable: false,
+                column_default: None,
+                extra: "auto_increment".into(),
+                ordinal: 1,
+            }],
+            primary_key: vec!["id".into()],
+            unique_indexes: vec![],
+            foreign_keys: vec![ForeignKey {
+                constraint_name: "fk".into(),
+                column_name: "user_id".into(),
+                referenced_table: "users".into(),
+                referenced_column: "id".into(),
+            }],
+            auto_increment: Some("id".into()),
+        },
+    );
+    tables.insert(
+        "audit_logs".into(),
+        TableInfo {
+            name: "audit_logs".into(),
+            engine: Some("InnoDB".into()),
+            columns: vec![ColumnInfo {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                column_type: "bigint".into(),
+                is_nullable: false,
+                column_default: None,
+                extra: "auto_increment".into(),
+                ordinal: 1,
+            }],
+            primary_key: vec!["id".into()],
+            unique_indexes: vec![],
+            foreign_keys: vec![],
+            auto_increment: Some("id".into()),
+        },
+    );
+    SchemaSnapshot {
+        database: "app".into(),
+        tables,
+    }
+}
+
+#[test]
+fn plan_excludes_and_orders_by_fk() {
+    let mut tables = IndexMap::new();
+    tables.insert(
+        "users".into(),
+        TableConfig {
+            columns: IndexMap::from([(
+                "password_hash".into(),
+                ColumnConfig {
+                    transform: TransformSpec::Named("null".into()),
+                },
+            )]),
+            ..Default::default()
+        },
+    );
+    tables.insert("orders".into(), TableConfig::default());
+    let plan = build_plan(
+        &base_resolved(tables),
+        &schema(),
+        &TransformRegistry::with_builtins(),
+    )
+    .unwrap();
+    assert!(!plan.selected_tables.iter().any(|t| t == "audit_logs"));
+    assert!(
+        plan.load_order.iter().position(|t| t == "users").unwrap()
+            < plan.load_order.iter().position(|t| t == "orders").unwrap()
+    );
+}
+
+#[test]
+fn rejects_null_on_not_null_column() {
+    let mut tables = IndexMap::new();
+    tables.insert(
+        "users".into(),
+        TableConfig {
+            columns: IndexMap::from([(
+                "email".into(),
+                ColumnConfig {
+                    transform: TransformSpec::Named("null".into()),
+                },
+            )]),
+            ..Default::default()
+        },
+    );
+    let err = build_plan(
+        &base_resolved(tables),
+        &schema(),
+        &TransformRegistry::with_builtins(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("NOT NULL"));
+}
