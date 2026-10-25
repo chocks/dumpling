@@ -65,3 +65,18 @@ destination: local
             || err.to_string().contains("mysql")
     );
 }
+
+#[test]
+fn removed_options_are_rejected_not_ignored() {
+    for key in [
+        "jobs: 4",
+        "preserve_auto_increment: true",
+        "deterministic: true",
+    ] {
+        let yaml = format!(
+            "version: 1\ndefaults:\n  {key}\nconnections:\n  a: {{ url: \"mysql://u@h/d\" }}\n"
+        );
+        let err = dumpling::config::Config::parse_yaml(&yaml).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{key}: {err}");
+    }
+}

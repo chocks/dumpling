@@ -14,7 +14,6 @@ environment, and a missing variable is an error.
 |---|---|
 | `version` | Must be `1` |
 | `defaults.batch_size` | Rows per page and per insert (default 2000) |
-| `defaults.jobs` | Accepted, currently unused (copying is sequential) |
 | `defaults.anonymize` | `false` copies raw values (default `true`) |
 | `defaults.safe_destination` | Require `allow_destination: true` (default `true`) |
 | `defaults.transform_secret` | HMAC secret. Prefer `DUMPLING_TRANSFORM_SECRET` |

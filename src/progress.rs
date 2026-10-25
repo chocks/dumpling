@@ -117,11 +117,17 @@ impl Reporter {
         println!("{}", style("Copying data...").bold());
     }
 
-    pub fn table_done(&self, table: &str, rows: u64) {
+    pub fn table_done(&self, table: &str, rows: u64, elapsed: std::time::Duration) {
         if self.quiet {
             return;
         }
-        println!("  {:20} {:>10} rows", table, format_count(rows));
+        let rate = rows as f64 / elapsed.as_secs_f64().max(0.001);
+        println!(
+            "  {:20} {:>10} rows  {}",
+            table,
+            format_count(rows),
+            style(format!("{}/s", format_count(rate as u64))).dim()
+        );
         let _ = io::stdout().flush();
     }
 

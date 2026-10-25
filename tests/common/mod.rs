@@ -133,9 +133,27 @@ destination: dst
         force: bool,
         dry_run: bool,
     ) -> dumpling::config::ResolvedConfig {
+        self.resolve_with(yaml, None, None, force, dry_run)
+    }
+
+    pub fn resolve_with(
+        &self,
+        yaml: &str,
+        tables: Option<Vec<String>>,
+        group: Option<String>,
+        force: bool,
+        dry_run: bool,
+    ) -> dumpling::config::ResolvedConfig {
         Config::parse_yaml(yaml)
             .unwrap()
-            .resolve(PathBuf::from("test.yml"), None, None, None, force, dry_run)
+            .resolve(
+                PathBuf::from("test.yml"),
+                None,
+                tables,
+                group,
+                force,
+                dry_run,
+            )
             .unwrap()
     }
 

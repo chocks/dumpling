@@ -109,4 +109,11 @@ transaction.
   insert/read errors report only the MySQL error code; the full text is logged
   at `-vv`.
 
+## Interruption and recovery
+
+Nothing is committed until every table is copied. If Dumpling fails, is killed,
+or loses the connection, MySQL rolls the destination transaction back. There are
+no automatic retries; re-run after fixing the cause. Both modes are safe to
+repeat.
+
 See `docs/PROGRESS.md` for what is verified and what is still open.

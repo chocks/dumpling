@@ -104,7 +104,7 @@ impl CopyEngine<'_> {
         for table in &self.plan.load_order {
             let started = Instant::now();
             let rows = self.copy_table(src, &mut tx, table, ctx, !replace).await?;
-            self.reporter.table_done(table, rows);
+            self.reporter.table_done(table, rows, started.elapsed());
             tracing::info!(
                 table = %table,
                 rows,

@@ -38,8 +38,8 @@ crash on `BIGINT UNSIGNED`, lossy `preserve` placeholder, composite FKs.
 
 Known limits (documented, not hidden): FK cycles and self-referencing tables are
 rejected; spatial types are unsupported; non-InnoDB tables are not rolled back;
-`jobs` is accepted but unused (copy is sequential to keep one snapshot and one
-transaction).
+copying is sequential (one snapshot, one transaction), so there is no
+concurrency setting.
 
 ## Phase 3 — Anonymization ✅
 
@@ -68,9 +68,34 @@ column options (`dob: { transform: random_date, min: .. }`).
 Known limits: client-side transforms hold raw values in memory for a batch;
 `hash` needs a column of at least 64 characters.
 
-## Phase 4 — Developer experience ⏳
+## Phase 4 — Developer experience ✅
 
-- [ ] Progress output with throughput
-- [ ] Groups and `--tables` verified end to end
-- [ ] CLI end-to-end tests (exit codes)
-- [ ] Remove or implement `jobs`
+Verified against MySQL 8.4 (`tests/cli.rs`, `tests/copy_integration.rs`):
+
+- [x] `--group` copies members plus their foreign-key parents only; `--tables`
+      restricts the run; an excluded parent is an error, not a silent gap
+- [x] CLI exit codes: config 3, safety 4, validation 6; `init` never overwrites
+      without `--force`; production destination refused even with `--force`;
+      `replace` without `--force` refused
+- [x] Output contains neither connection passwords nor source values
+- [x] Killing the process mid-copy (300,000 rows, killed at 400 ms of a ~3 s run)
+      never leaves a partial destination
+- [x] Per-table throughput in the output; plan shows exact row counts
+- [x] Removed the unused `jobs` and `preserve_auto_increment` keys (they did
+      nothing; ids are always preserved)
+
+Measured (debug build, local Docker, 2 columns): about 95,000 rows/s.
+Throughput has not been tuned.
+
+Recovery: there are no automatic retries. A failed or interrupted run leaves the
+destination exactly as it was (InnoDB); fix the cause and run again. Re-running
+is safe because `replace` clears and reloads, and `merge` is an upsert.
+
+## Open items
+
+- Foreign-key cycles / self-referencing tables (rejected today)
+- Spatial column types
+- Structured filters instead of raw SQL `where`
+- TLS options are whatever the URL specifies; not covered by tests
+- Parallel table copy (would need one transaction per table, losing atomicity)
+- CI workflow

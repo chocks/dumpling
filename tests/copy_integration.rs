@@ -309,3 +309,57 @@ async fn dry_run_reports_exact_row_counts_and_modifies_nothing() {
     assert_eq!(s.estimated_rows["plain"], Some(4));
     assert_eq!(count(&fx.dst, "SELECT COUNT(*) FROM items").await, 0);
 }
+
+const SELECTION_YAML: &str = r#"
+mode: merge
+tables:
+  users: {}
+  orders: {}
+  order_items: {}
+  notes: {}
+groups:
+  recent: [orders]
+"#;
+
+#[tokio::test]
+async fn group_copies_members_and_their_parents_only() {
+    let Some(fx) = Fixture::with_schema("group", FK_SCHEMA, FK_SEED).await else {
+        return;
+    };
+    let yaml = fx.yaml("", SELECTION_YAML);
+    let resolved = fx.resolve_with(&yaml, None, Some("recent".into()), false, false);
+    dumpling::sync::run_sync(&resolved, &dumpling::progress::Reporter::new(true))
+        .await
+        .unwrap();
+    assert_eq!(ids(&fx.dst, "users").await, vec![1, 2], "parent pulled in");
+    assert_eq!(ids(&fx.dst, "orders").await, vec![10, 11]);
+    assert!(
+        ids(&fx.dst, "order_items").await.is_empty(),
+        "child not selected"
+    );
+}
+
+#[tokio::test]
+async fn tables_flag_restricts_the_run() {
+    let Some(fx) = Fixture::with_schema("tablesflag", FK_SCHEMA, FK_SEED).await else {
+        return;
+    };
+    let yaml = fx.yaml("", SELECTION_YAML);
+    let resolved = fx.resolve_with(&yaml, Some(vec!["users".into()]), None, false, false);
+    dumpling::sync::run_sync(&resolved, &dumpling::progress::Reporter::new(true))
+        .await
+        .unwrap();
+    assert_eq!(ids(&fx.dst, "users").await, vec![1, 2]);
+    assert!(ids(&fx.dst, "orders").await.is_empty());
+}
+
+#[tokio::test]
+async fn excluded_parent_is_reported_not_silently_skipped() {
+    let Some(fx) = Fixture::with_schema("missingdep", FK_SCHEMA, FK_SEED).await else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  orders: {}\nexclude: [users]\n");
+    let err = fx.sync(&yaml, false, false).await.unwrap_err().to_string();
+    assert!(err.contains("users"), "{err}");
+    assert!(ids(&fx.dst, "orders").await.is_empty());
+}

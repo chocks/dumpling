@@ -10,12 +10,10 @@ version: 1
 
 defaults:
   batch_size: 2000
-  jobs: 4
   anonymize: true
   # Refuse writes unless the destination connection sets allow_destination: true
   # and is not marked production.
   safe_destination: true
-  preserve_auto_increment: true
   # Prefer the DUMPLING_TRANSFORM_SECRET environment variable over putting a
   # secret in this file. (Avoid ${...} placeholders in comments — they are
   # interpolated everywhere in the file.)

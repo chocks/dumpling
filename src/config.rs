@@ -47,14 +47,10 @@ pub struct Environment {
 pub struct Defaults {
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
-    #[serde(default = "default_jobs")]
-    pub jobs: usize,
     #[serde(default = "default_true")]
     pub anonymize: bool,
     #[serde(default = "default_true")]
     pub safe_destination: bool,
-    #[serde(default = "default_true")]
-    pub preserve_auto_increment: bool,
     /// Secret for keyed transforms (HMAC). Prefer the DUMPLING_TRANSFORM_SECRET env var.
     /// Unset: a random secret is generated per run (outputs differ between runs).
     #[serde(default)]
@@ -65,10 +61,8 @@ impl Default for Defaults {
     fn default() -> Self {
         Self {
             batch_size: default_batch_size(),
-            jobs: default_jobs(),
             anonymize: true,
             safe_destination: true,
-            preserve_auto_increment: true,
             transform_secret: None,
         }
     }
@@ -76,9 +70,6 @@ impl Default for Defaults {
 
 fn default_batch_size() -> usize {
     2000
-}
-fn default_jobs() -> usize {
-    4
 }
 fn default_true() -> bool {
     true
@@ -262,9 +253,6 @@ impl Config {
             return Err(DumplingError::Config(
                 "defaults.batch_size must be >= 1".into(),
             ));
-        }
-        if self.defaults.jobs == 0 {
-            return Err(DumplingError::Config("defaults.jobs must be >= 1".into()));
         }
         Ok(())
     }
