@@ -15,8 +15,13 @@ dumpling --help
 2. **API token**: crates.io → Account Settings → API Tokens → New Token.
    Scopes: `publish-new` and `publish-update`. Crate pattern `dumpling-cli`
    once the crate exists (for the very first publish it has to be unrestricted).
-3. **GitHub secret**: repo → Settings → Secrets and variables → Actions →
-   New repository secret named `CARGO_REGISTRY_TOKEN`.
+3. **GitHub environment + secret** (publishing happens in CI, never locally):
+   repo → Settings → Environments → New environment named `crates-io`.
+   Add an environment secret `CARGO_REGISTRY_TOKEN` (the token from step 2).
+   Recommended: add yourself under "Required reviewers" so every publish needs
+   a click, and restrict "Deployment branches and tags" to `v*`.
+   The token is only available to the `publish` job, which runs after the
+   tests pass; the test job never sees it.
 4. Confirm `package.name`, `repository` and `version` in `Cargo.toml`.
 
 ## Each release
@@ -35,6 +40,12 @@ git push origin main --tags
 
 The `Release` workflow refuses to publish if the tag does not match the
 `Cargo.toml` version, and it re-runs the full test suite against MySQL first.
+
+The workflow only publishes tags like `v0.1.0` that point at a commit on
+`main`. Actions are pinned to commit SHAs (Dependabot opens PRs to update them).
+
+Later upgrade: once the crate exists, switch to crates.io *Trusted Publishing*
+(OIDC) so no long-lived token is stored at all.
 
 A published version can be yanked (`cargo yank`) but never deleted or
 overwritten, so check the dry run before tagging.

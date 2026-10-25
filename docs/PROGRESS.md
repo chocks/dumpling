@@ -84,12 +84,29 @@ Verified against MySQL 8.4 (`tests/cli.rs`, `tests/copy_integration.rs`):
 - [x] Removed the unused `jobs` and `preserve_auto_increment` keys (they did
       nothing; ids are always preserved)
 
-Measured (debug build, local Docker, 2 columns): about 95,000 rows/s.
-Throughput has not been tuned.
+Initial throughput was measured as a baseline before any tuning.
 
 Recovery: there are no automatic retries. A failed or interrupted run leaves the
 destination exactly as it was (InnoDB); fix the cause and run again. Re-running
 is safe because `replace` clears and reloads, and `merge` is an upsert.
+
+## After Phase 4 — pipeline, CI, publishing ✅
+
+- [x] Reader/writer pipeline (see ARCHITECTURE). 1M rows × 5 columns, release
+      build, local Docker MySQL 8.4 (one machine, indicative only):
+
+      | Case | Sequential | Pipelined |
+      |---|---|---|
+      | Plain copy | 287k rows/s | 323k rows/s |
+      | 4 transforms (HMAC, unique tracking) | 188k rows/s | 266k rows/s |
+
+- [x] Test that a mid-run read failure commits nothing (mutation-checked: the
+      test fails if the commit rule is weakened)
+- [x] GitHub Actions: fmt, clippy, tests against MySQL via docker compose, and
+      an MSRV (1.94) check; actions pinned to commit SHAs; Dependabot
+- [x] Release workflow publishes to crates.io from CI on a `v*` tag, in a
+      protected `crates-io` environment. See `docs/RELEASING.md`
+- [ ] First publish (needs the `CARGO_REGISTRY_TOKEN` environment secret)
 
 ## Open items
 
