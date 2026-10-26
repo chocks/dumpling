@@ -1,5 +1,8 @@
 # Dumpling 🥟
 
+[![Crates.io Version](https://img.shields.io/crates/v/dumpling-cli.svg)](https://crates.io/crates/dumpling-cli)
+[![Crates.io](https://img.shields.io/badge/crates.io-dumpling--cli-orange)](https://crates.io/crates/dumpling-cli)
+
 **Copy production. Lose the secrets. Keep the bugs.**
 
 Dumpling copies a MySQL database into a local one and anonymizes sensitive
