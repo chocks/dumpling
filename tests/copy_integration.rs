@@ -388,3 +388,62 @@ async fn read_failure_midway_commits_nothing() {
         "batches written before the failure must roll back"
     );
 }
+
+#[tokio::test]
+async fn generated_columns_are_not_written() {
+    let ddl = "CREATE TABLE t (id INT PRIMARY KEY, a INT NOT NULL, b INT NOT NULL, \
+               total INT GENERATED ALWAYS AS (a + b) STORED, \
+               v INT GENERATED ALWAYS AS (a * 2) VIRTUAL) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::new(
+        "gencols",
+        &format!("{ddl} INSERT INTO t (id, a, b) VALUES (1, 1, 2), (2, 3, 4);"),
+        ddl,
+    )
+    .await
+    else {
+        return;
+    };
+    for mode in ["merge", "replace"] {
+        let yaml = fx.yaml("", &format!("mode: {mode}\ntables:\n  t: {{}}\n"));
+        fx.sync(&yaml, mode == "replace", false).await.unwrap();
+        assert_eq!(
+            count(&fx.dst, "SELECT CAST(SUM(total) AS SIGNED) FROM t").await,
+            3 + 7,
+            "{mode}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn merge_into_pk_only_table_surfaces_fk_violations() {
+    let src = "CREATE TABLE parents (id INT PRIMARY KEY) ENGINE=InnoDB; \
+               CREATE TABLE links (parent_id INT, role_id INT, PRIMARY KEY (parent_id, role_id)) ENGINE=InnoDB; \
+               INSERT INTO links VALUES (1, 1), (2, 2);";
+    let dst = "CREATE TABLE parents (id INT PRIMARY KEY) ENGINE=InnoDB; \
+               CREATE TABLE links (parent_id INT, role_id INT, PRIMARY KEY (parent_id, role_id), \
+               FOREIGN KEY (parent_id) REFERENCES parents (id)) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::new("pkonlyfk", src, dst).await else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  links: {}\n");
+    let res = fx.sync(&yaml, false, false).await;
+    assert!(res.is_err(), "FK violation must not be silently ignored");
+    assert_eq!(count(&fx.dst, "SELECT COUNT(*) FROM links").await, 0);
+}
+
+#[tokio::test]
+async fn merge_into_pk_only_table_ignores_duplicates() {
+    let ddl = "CREATE TABLE links (a INT, b INT, PRIMARY KEY (a, b)) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::new(
+        "pkonlydup",
+        &format!("{ddl} INSERT INTO links VALUES (1,1),(2,2);"),
+        &format!("{ddl} INSERT INTO links VALUES (1,1);"),
+    )
+    .await
+    else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  links: {}\n");
+    fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(count(&fx.dst, "SELECT COUNT(*) FROM links").await, 2);
+}
