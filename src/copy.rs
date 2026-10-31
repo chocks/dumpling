@@ -193,6 +193,10 @@ impl CopyEngine<'_> {
         let anonymize = self.resolved.config.defaults.anonymize;
         let mut out = Vec::new();
         for col in &info.columns {
+            if is_generated(col) {
+                tracing::debug!("`{table}.{}` is a generated column; skipped", col.name);
+                continue;
+            }
             if dest.column(&col.name).is_none() {
                 tracing::warn!(
                     "`{table}.{}` does not exist in the destination; skipped",
@@ -433,4 +437,10 @@ struct TablePlan<'a> {
     slot: Vec<Option<usize>>,
     key: Vec<String>,
     key_slots: Vec<(usize, Kind)>,
+}
+
+/// VIRTUAL/STORED GENERATED columns cannot be written (MySQL error 3105).
+fn is_generated(col: &crate::db::introspect::ColumnInfo) -> bool {
+    let extra = col.extra.to_ascii_lowercase();
+    extra.contains("virtual generated") || extra.contains("stored generated")
 }

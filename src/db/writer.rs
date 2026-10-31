@@ -14,11 +14,9 @@ use sqlx::{AssertSqlSafe, MySqlConnection};
 const MAX_PLACEHOLDERS: usize = 60_000;
 
 pub fn validate_ident(name: &str) -> Result<()> {
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-    {
+    // Identifiers are always escaped by `quote_ident`, so any MySQL name is
+    // safe; only names MySQL itself cannot represent are rejected.
+    if name.is_empty() || name.contains('\0') {
         return Err(DumplingError::Validation(format!(
             "invalid SQL identifier `{name}`"
         )));
@@ -60,7 +58,11 @@ pub fn build_insert_sql(table: &TableInfo, columns: &[&str], rows: usize, upsert
         .map(|c| format!("{0}=VALUES({0})", quote_ident(c)))
         .collect();
     if updates.is_empty() {
-        format!("INSERT IGNORE INTO {name} ({cols}) VALUES {values}")
+        // Not INSERT IGNORE: that would also downgrade FK/NOT NULL/truncation
+        // errors to warnings and silently drop rows. A no-op update only
+        // ignores duplicate-key conflicts.
+        let pk = quote_ident(table.primary_key.first().map_or(columns[0], String::as_str));
+        format!("INSERT INTO {name} ({cols}) VALUES {values} ON DUPLICATE KEY UPDATE {pk}={pk}")
     } else {
         format!(
             "INSERT INTO {name} ({cols}) VALUES {values} ON DUPLICATE KEY UPDATE {}",
@@ -127,5 +129,19 @@ pub fn redact_db_error(e: &sqlx::Error) -> String {
             )
         }
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_any_quotable_identifier() {
+        for n in ["order-items", "Straße", "a b", "a.b", "t$1"] {
+            assert!(validate_ident(n).is_ok(), "{n}");
+        }
+        assert!(validate_ident("").is_err());
+        assert!(validate_ident("a\0b").is_err());
     }
 }
