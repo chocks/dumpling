@@ -171,28 +171,21 @@ pub async fn introspect(pool: &MySqlPool) -> Result<SchemaSnapshot> {
     .await
     .map_err(|e| DumplingError::Database(format!("list unique indexes failed: {e}")))?;
 
-    let mut current: Option<(String, String, Vec<String>)> = None;
+    let mut current: Option<(String, String, Vec<Option<String>>)> = None;
     for row in uniq_rows {
         let table: String = row.try_get("TABLE_NAME").map_err(db_err)?;
         let index: String = row.try_get("INDEX_NAME").map_err(db_err)?;
-        let col: String = row.try_get("COLUMN_NAME").map_err(db_err)?;
+        // Functional (expression) index parts have a NULL COLUMN_NAME.
+        let col: Option<String> = row.try_get("COLUMN_NAME").map_err(db_err)?;
         match &mut current {
             Some((t, i, cols)) if *t == table && *i == index => cols.push(col),
             _ => {
-                if let Some((t, _, cols)) = current.take()
-                    && let Some(info) = tables.get_mut(&t)
-                {
-                    info.unique_indexes.push(cols);
-                }
+                flush_unique(&mut tables, current.take());
                 current = Some((table, index, vec![col]));
             }
         }
     }
-    if let Some((t, _, cols)) = current
-        && let Some(info) = tables.get_mut(&t)
-    {
-        info.unique_indexes.push(cols);
-    }
+    flush_unique(&mut tables, current);
 
     let fk_rows = sqlx::query(
         r#"
@@ -201,6 +194,7 @@ pub async fn introspect(pool: &MySqlPool) -> Result<SchemaSnapshot> {
         FROM information_schema.KEY_COLUMN_USAGE
         WHERE TABLE_SCHEMA = ?
           AND REFERENCED_TABLE_NAME IS NOT NULL
+          AND REFERENCED_TABLE_SCHEMA = TABLE_SCHEMA
         ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION
         "#,
     )
@@ -236,6 +230,21 @@ pub async fn introspect(pool: &MySqlPool) -> Result<SchemaSnapshot> {
     }
 
     Ok(SchemaSnapshot { database, tables })
+}
+
+/// Record a unique index unless it contains an expression part: such an index
+/// cannot serve as a paging key, and skipping it is safe (it is optional
+/// metadata, unlike the primary key).
+fn flush_unique(
+    tables: &mut IndexMap<String, TableInfo>,
+    index: Option<(String, String, Vec<Option<String>>)>,
+) {
+    if let Some((t, _, cols)) = index
+        && let Some(info) = tables.get_mut(&t)
+        && let Some(cols) = cols.into_iter().collect::<Option<Vec<String>>>()
+    {
+        info.unique_indexes.push(cols);
+    }
 }
 
 fn db_err(e: sqlx::Error) -> DumplingError {
