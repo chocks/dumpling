@@ -1,7 +1,7 @@
 [package]
 # `dumpling` is taken on crates.io; the binary and library are still `dumpling`.
 name = "dumpling-cli"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.94"
 description = "Copy MySQL databases into local environments while anonymizing sensitive data"

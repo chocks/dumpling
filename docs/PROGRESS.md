@@ -111,6 +111,30 @@ is safe because `replace` clears and reloads, and `merge` is an upsert.
 - [x] Runners pinned to `ubuntu-24.04`; a non-blocking `ubuntu-26.04` job previews
       the next `ubuntu-latest`
 
+## 0.0.2 — correctness and safety fixes ✅
+
+Fixes from an automated code review (issues #5–#14), each with a regression
+test against MySQL 8.4 where it could be reproduced:
+
+- Generated columns are no longer written (MySQL error 3105)
+- Identifier validation accepts any quotable MySQL name (`order-items`, `Straße`)
+- Merge into primary-key-only tables no longer uses `INSERT IGNORE`, so FK and
+  NOT NULL errors surface instead of silently dropping rows
+- Introspection tolerates functional indexes and ignores cross-schema FKs
+- Same-database check works on MariaDB (host + port + schema, UUID when present)
+- Production host detection matches whole words; new `not_production: true`
+  connection option clears false positives; interactive `replace --force`
+  asks for the destination host
+- `${VAR}` interpolation runs on the parsed YAML (comments ignored, special
+  characters safe); config structure errors no longer carry YAML line numbers
+- Filter validation is a lexical scan, not substring matching
+- Keyset paging compares ENUM/SET numerically and casts DECIMAL/temporal keys
+- Parent-filter SQL stays linear for deep/diamond FK graphs (uses CTEs, so deep
+  graphs need MySQL 8.0+ / MariaDB 10.2+)
+
+Not covered by tests: the MariaDB identity check was not run on MariaDB, and the
+interactive `replace` confirmation needs a terminal.
+
 ## Open items
 
 - Foreign-key cycles / self-referencing tables (rejected today)
