@@ -17,6 +17,10 @@ pub struct SyncPlan {
     /// Full SQL `WHERE` body per table: its own filter plus constraints that keep
     /// child rows from referencing parent rows that were filtered out.
     pub effective_where: IndexMap<String, Option<String>>,
+    /// `WITH ...` prefix per table defining the CTEs its `effective_where`
+    /// refers to (only for tables below several levels of restricted
+    /// parents; see [`effective_filters`]).
+    pub effective_with: IndexMap<String, Option<String>>,
     pub estimated_rows: IndexMap<String, Option<u64>>,
     pub warnings: Vec<String>,
 }
@@ -182,10 +186,8 @@ pub fn build_plan(
         .iter()
         .filter_map(|(t, c)| c.filter().map(|f| (t.as_str(), f)))
         .collect();
-    let mut effective_where = IndexMap::new();
-    for t in &selected_tables {
-        effective_where.insert(t.clone(), effective_filter(t, schema, &expanded, &own));
-    }
+    let (effective_where, effective_with) =
+        effective_filters(&selected_tables, schema, &expanded, &own);
 
     Ok(SyncPlan {
         selected_tables,
@@ -195,63 +197,156 @@ pub fn build_plan(
         missing_dependencies,
         transform_count,
         effective_where,
+        effective_with,
         estimated_rows: IndexMap::new(),
         warnings,
     })
 }
 
-/// A table's own filter AND, for every selected parent that is itself
+/// Per table: its own filter AND, for every selected parent that is itself
 /// restricted, a semi-join so a child row is only copied if its parent row is.
 /// Nullable FK columns are exempt when NULL (MySQL does not check them).
-fn effective_filter(
-    table: &str,
+///
+/// Embedding a parent's whole filter text in every child makes the SQL grow
+/// with the number of FK *paths* (exponentially for chains of diamonds). So a
+/// parent that has no restricted ancestors of its own is inlined as a
+/// subquery, while one that does is defined once as a CTE
+/// (`WITH dumpling_ok_<table> AS (...)`) and referenced by name, keeping the
+/// size linear. The second map holds each table's `WITH` prefix.
+fn effective_filters(
+    tables: &[String],
     schema: &SchemaSnapshot,
     selected: &HashSet<String>,
     own: &HashMap<&str, &str>,
-) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(f) = own.get(table) {
-        parts.push(format!("({f})"));
+) -> (
+    IndexMap<String, Option<String>>,
+    IndexMap<String, Option<String>>,
+) {
+    struct Node {
+        pred: Option<String>,
+        /// No restricted ancestors: `pred` is just the table's own filter.
+        simple: bool,
+        /// CTEs `pred` depends on, parents first.
+        ctes: Vec<String>,
     }
-    let info = schema.tables.get(table)?;
-    for fk in &info.foreign_keys {
-        let parent = &fk.referenced_table;
-        // Cycles were rejected earlier, so this recursion terminates.
-        if !selected.contains(parent) {
-            continue;
+    struct Ctx<'a> {
+        schema: &'a SchemaSnapshot,
+        selected: &'a HashSet<String>,
+        own: &'a HashMap<&'a str, &'a str>,
+        memo: HashMap<String, std::rc::Rc<Node>>,
+        /// Columns each CTE table must expose.
+        cte_columns: IndexMap<String, Vec<String>>,
+    }
+    fn cte_name(table: &str) -> String {
+        quote_ident(&format!("dumpling_ok_{table}"))
+    }
+    fn q(cols: &[String]) -> String {
+        cols.iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    fn node(table: &str, cx: &mut Ctx) -> std::rc::Rc<Node> {
+        if let Some(n) = cx.memo.get(table) {
+            return n.clone();
         }
-        let Some(parent_where) = effective_filter(parent, schema, selected, own) else {
-            continue;
-        };
-        let q = |cols: &[String]| {
-            cols.iter()
-                .map(|c| quote_ident(c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let semi = format!(
-            "({}) IN (SELECT {} FROM {} WHERE {parent_where})",
-            q(&fk.columns),
-            q(&fk.referenced_columns),
-            quote_ident(parent)
-        );
-        let null_guards: Vec<String> = fk
-            .columns
-            .iter()
-            .filter(|c| info.column(c).is_some_and(|c| c.is_nullable))
-            .map(|c| format!("{} IS NULL", quote_ident(c)))
-            .collect();
-        parts.push(if null_guards.is_empty() {
-            semi
-        } else {
-            format!("({} OR {semi})", null_guards.join(" OR "))
+        let mut parts = Vec::new();
+        let mut ctes: Vec<String> = Vec::new();
+        let mut simple = true;
+        if let Some(f) = cx.own.get(table) {
+            parts.push(format!("({f})"));
+        }
+        if let Some(info) = cx.schema.tables.get(table) {
+            for fk in &info.foreign_keys {
+                let parent = &fk.referenced_table;
+                // Cycles were rejected earlier, so this recursion terminates.
+                if !cx.selected.contains(parent) {
+                    continue;
+                }
+                let pn = node(parent, cx);
+                let Some(parent_pred) = &pn.pred else {
+                    continue;
+                };
+                simple = false;
+                let source = if pn.simple {
+                    format!(
+                        "SELECT {} FROM {} WHERE {parent_pred}",
+                        q(&fk.referenced_columns),
+                        quote_ident(parent)
+                    )
+                } else {
+                    for dep in pn.ctes.iter().chain(std::iter::once(parent)) {
+                        if !ctes.contains(dep) {
+                            ctes.push(dep.clone());
+                        }
+                    }
+                    let cols = cx.cte_columns.entry(parent.clone()).or_default();
+                    for c in &fk.referenced_columns {
+                        if !cols.contains(c) {
+                            cols.push(c.clone());
+                        }
+                    }
+                    format!(
+                        "SELECT {} FROM {}",
+                        q(&fk.referenced_columns),
+                        cte_name(parent)
+                    )
+                };
+                let semi = format!("({}) IN ({source})", q(&fk.columns));
+                let null_guards: Vec<String> = fk
+                    .columns
+                    .iter()
+                    .filter(|c| info.column(c).is_some_and(|c| c.is_nullable))
+                    .map(|c| format!("{} IS NULL", quote_ident(c)))
+                    .collect();
+                parts.push(if null_guards.is_empty() {
+                    semi
+                } else {
+                    format!("({} OR {semi})", null_guards.join(" OR "))
+                });
+            }
+        }
+        let n = std::rc::Rc::new(Node {
+            pred: (!parts.is_empty()).then(|| parts.join(" AND ")),
+            simple,
+            ctes,
         });
+        cx.memo.insert(table.to_string(), n.clone());
+        n
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" AND "))
+
+    let mut cx = Ctx {
+        schema,
+        selected,
+        own,
+        memo: HashMap::new(),
+        cte_columns: IndexMap::new(),
+    };
+    let nodes: Vec<_> = tables.iter().map(|t| node(t, &mut cx)).collect();
+    let mut wheres = IndexMap::new();
+    let mut withs = IndexMap::new();
+    for (t, n) in tables.iter().zip(&nodes) {
+        wheres.insert(t.clone(), n.pred.clone());
+        let with = (!n.ctes.is_empty()).then(|| {
+            let defs: Vec<String> = n
+                .ctes
+                .iter()
+                .map(|c| {
+                    let cn = cx.memo[c].clone();
+                    format!(
+                        "{} AS (SELECT {} FROM {} WHERE {})",
+                        cte_name(c),
+                        q(&cx.cte_columns[c]),
+                        quote_ident(c),
+                        cn.pred.as_deref().unwrap_or("1")
+                    )
+                })
+                .collect();
+            format!("WITH {} ", defs.join(", "))
+        });
+        withs.insert(t.clone(), with);
     }
+    (wheres, withs)
 }
 
 fn validate_filter_expression(table: &str, filter: &str) -> Result<()> {
@@ -368,7 +463,12 @@ fn topological_sort(
 pub async fn estimate_rows(pool: &crate::db::MySqlPool, plan: &mut SyncPlan) -> Result<()> {
     for table in &plan.load_order {
         crate::db::writer::validate_ident(table)?;
-        let mut sql = format!("SELECT COUNT(*) FROM {}", quote_ident(table));
+        let with = plan
+            .effective_with
+            .get(table)
+            .and_then(|w| w.as_deref())
+            .unwrap_or("");
+        let mut sql = format!("{with}SELECT COUNT(*) FROM {}", quote_ident(table));
         if let Some(Some(f)) = plan.effective_where.get(table) {
             sql.push_str(&format!(" WHERE {f}"));
         }

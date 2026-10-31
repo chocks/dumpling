@@ -263,3 +263,82 @@ fn rejects_foreign_key_cycles() {
     .unwrap_err();
     assert!(err.to_string().contains("cycle"), "{err}");
 }
+
+/// `levels` stacked diamonds: t0 <- (a1, b1) <- t1 <- (a2, b2) <- t2 ...
+/// The number of FK paths from the last table to t0 is 2^levels.
+fn diamond_chain(levels: usize) -> (SchemaSnapshot, String) {
+    let table = |name: &str, parents: &[&str]| TableInfo {
+        name: name.into(),
+        engine: Some("InnoDB".into()),
+        columns: std::iter::once("id".to_string())
+            .chain(parents.iter().map(|p| format!("{p}_id")))
+            .enumerate()
+            .map(|(i, n)| ColumnInfo {
+                name: n,
+                data_type: "bigint".into(),
+                column_type: "bigint".into(),
+                is_nullable: false,
+                column_default: None,
+                extra: String::new(),
+                ordinal: i as u32 + 1,
+            })
+            .collect(),
+        primary_key: vec!["id".into()],
+        unique_indexes: vec![],
+        foreign_keys: parents
+            .iter()
+            .map(|p| ForeignKey {
+                constraint_name: format!("fk_{name}_{p}"),
+                columns: vec![format!("{p}_id")],
+                referenced_table: (*p).into(),
+                referenced_columns: vec!["id".into()],
+            })
+            .collect(),
+        auto_increment: None,
+    };
+    let mut tables = IndexMap::new();
+    tables.insert("t0".to_string(), table("t0", &[]));
+    for l in 1..=levels {
+        let prev = format!("t{}", l - 1);
+        let (a, b, t) = (format!("a{l}"), format!("b{l}"), format!("t{l}"));
+        tables.insert(a.clone(), table(&a, &[&prev]));
+        tables.insert(b.clone(), table(&b, &[&prev]));
+        tables.insert(t.clone(), table(&t, &[&a, &b]));
+    }
+    (
+        SchemaSnapshot {
+            database: "src".into(),
+            tables,
+        },
+        format!("t{levels}"),
+    )
+}
+
+#[test]
+fn filter_sql_stays_linear_for_diamond_chains() {
+    let size = |levels: usize| {
+        let (schema, last) = diamond_chain(levels);
+        let mut tables = IndexMap::new();
+        tables.insert(
+            "t0".to_string(),
+            TableConfig {
+                r#where: Some("id < 100".into()),
+                ..Default::default()
+            },
+        );
+        tables.insert(last.clone(), TableConfig::default());
+        let mut resolved = base_resolved(tables);
+        resolved.config.exclude.clear();
+        let plan = build_plan(&resolved, &schema, &TransformRegistry::with_builtins()).unwrap();
+        plan.effective_where[&last].as_ref().unwrap().len()
+            + plan.effective_with[&last].as_ref().map_or(0, |w| w.len())
+    };
+    let (s10, s20) = (size(10), size(20));
+    // Linear growth: doubling the depth roughly doubles the size. The old
+    // inlined form would be ~1000x larger at 20 levels than at 10.
+    assert!(
+        s20 < s10 * 3,
+        "10 levels: {s10} bytes, 20 levels: {s20} bytes"
+    );
+    assert!(s20 < 20_000, "{s20}");
+}

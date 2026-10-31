@@ -328,6 +328,12 @@ impl CopyEngine<'_> {
             .effective_where
             .get(table)
             .and_then(|f| f.as_deref());
+        let with = self
+            .plan
+            .effective_with
+            .get(table)
+            .and_then(|w| w.as_deref())
+            .unwrap_or("");
         let batch_size = self.resolved.config.defaults.batch_size;
 
         let mut last: Option<Vec<TransformedValue>> = None;
@@ -345,7 +351,7 @@ impl CopyEngine<'_> {
                 format!(" WHERE {}", wheres.join(" AND "))
             };
             let sql = format!(
-                "SELECT {} FROM {}{where_sql} ORDER BY {order} LIMIT {batch_size}",
+                "{with}SELECT {} FROM {}{where_sql} ORDER BY {order} LIMIT {batch_size}",
                 plan.selects.join(", "),
                 quote_ident(table)
             );
