@@ -48,22 +48,13 @@ pub fn assert_destination_writable(resolved: &ResolvedConfig) -> Result<()> {
         )));
     }
 
-    if resolved.config.defaults.safe_destination {
-        if !dest.allow_destination {
-            return Err(DumplingError::Safety(format!(
-                "refusing to write to `{}`: set allow_destination: true on this \
-                 connection after confirming it is a development database \
-                 (safe_destination is enabled)",
-                resolved.dest_name
-            )));
-        }
-        if class == DestinationClass::Ambiguous && !dest.allow_destination {
-            return Err(DumplingError::Safety(format!(
-                "refusing ambiguous destination `{}` ({})",
-                resolved.dest_name,
-                redacted_host(&dest.url)
-            )));
-        }
+    if resolved.config.defaults.safe_destination && !dest.allow_destination {
+        return Err(DumplingError::Safety(format!(
+            "refusing to write to `{}`: set allow_destination: true on this \
+             connection after confirming it is a development database \
+             (safe_destination is enabled)",
+            resolved.dest_name
+        )));
     }
 
     // Destructive replace requires --force even on allowed destinations.
@@ -87,16 +78,37 @@ pub fn assert_destination_writable(resolved: &ResolvedConfig) -> Result<()> {
         let allow = std::env::var("DUMPLING_ALLOW_REPLACE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        if !allow && !is_interactive() {
-            return Err(DumplingError::Safety(
-                "replace with --force in noninteractive mode also requires \
-                 DUMPLING_ALLOW_REPLACE=1"
-                    .into(),
-            ));
+        if !allow {
+            if !is_interactive() {
+                return Err(DumplingError::Safety(
+                    "replace with --force in noninteractive mode also requires \
+                     DUMPLING_ALLOW_REPLACE=1"
+                        .into(),
+                ));
+            }
+            confirm_replace(&redacted_host(&dest.url))?;
         }
     }
 
     Ok(())
+}
+
+/// Second confirmation for `replace --force` in a terminal: the user must
+/// type the destination host.
+fn confirm_replace(host: &str) -> Result<()> {
+    let term = console::Term::stderr();
+    let _ = term.write_line(&format!(
+        "mode: replace will DELETE existing rows in the destination ({host})."
+    ));
+    let _ = term.write_str("Type the destination host to continue: ");
+    let answer = term.read_line().unwrap_or_default();
+    if answer.trim() == host {
+        Ok(())
+    } else {
+        Err(DumplingError::Safety(
+            "replace not confirmed; nothing was changed".into(),
+        ))
+    }
 }
 
 fn is_interactive() -> bool {
@@ -141,24 +153,40 @@ pub fn classify_destination(url_str: &str, conn: &Connection) -> Result<Destinat
         return Ok(DestinationClass::LocalDev);
     }
 
-    // Conservative production-like signals.
-    let production_markers = [
-        "prod",
-        "production",
-        "prd",
-        "live",
-        "primary",
-        "aurora",
+    if conn.not_production {
+        return Ok(DestinationClass::Ambiguous);
+    }
+
+    if looks_like_production(&host) {
+        return Ok(DestinationClass::Production);
+    }
+
+    Ok(DestinationClass::Ambiguous)
+}
+
+/// Hosts are split into words (`product-dev.example.com` is `product`, `dev`,
+/// `example`, `com`) so `prod` does not match `product`. Unambiguous words
+/// (`prod`, `prd`, `production`) always win; weaker ones (`live`, `primary`)
+/// are overridden by an explicit dev-like word. Managed-cloud domains are
+/// always production-like. Anything else is rejected as ambiguous unless the
+/// connection sets `allow_destination`; a wrongly flagged host can be cleared
+/// with `not_production: true`.
+fn looks_like_production(host: &str) -> bool {
+    const STRONG: &[&str] = &["prod", "production", "prd"];
+    const WEAK: &[&str] = &["live", "primary", "aurora"];
+    const DEV: &[&str] = &["dev", "development", "test", "qa", "local", "sandbox", "ci"];
+    const CLOUD_DOMAINS: &[&str] = &[
         "rds.amazonaws.com",
         "cloudsql",
         "database.azure.com",
         "googleapis.com",
     ];
-    if production_markers.iter().any(|m| host.contains(m)) {
-        return Ok(DestinationClass::Production);
-    }
-
-    Ok(DestinationClass::Ambiguous)
+    let words: Vec<&str> = host
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |set: &[&str]| words.iter().any(|w| set.contains(w));
+    has(STRONG) || CLOUD_DOMAINS.iter().any(|d| host.contains(d)) || (has(WEAK) && !has(DEV))
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -215,6 +243,7 @@ mod tests {
                 url: "mysql://u:p@prod.example.com/db".into(),
                 allow_destination: false,
                 production: true,
+                not_production: false,
             },
         );
         connections.insert(
@@ -223,6 +252,7 @@ mod tests {
                 url: dest_url.into(),
                 allow_destination: allow,
                 production,
+                not_production: false,
             },
         );
         let config = Config {
@@ -321,10 +351,56 @@ mod tests {
             url: "mysql://u:p@mydb.abcd.us-east-1.rds.amazonaws.com/app".into(),
             allow_destination: true,
             production: false,
+            not_production: false,
         };
         assert_eq!(
             classify_destination(&conn.url, &conn).unwrap(),
             DestinationClass::Production
+        );
+    }
+
+    fn class_of(host: &str) -> DestinationClass {
+        let conn = Connection {
+            url: format!("mysql://u:p@{host}/app"),
+            allow_destination: true,
+            production: false,
+            not_production: false,
+        };
+        classify_destination(&conn.url, &conn).unwrap()
+    }
+
+    #[test]
+    fn matches_whole_words_not_substrings() {
+        for h in [
+            "delivery-db.dev.internal",
+            "product-dev.example.com",
+            "primary-replica.dev",
+            "olive.example.com",
+        ] {
+            assert_eq!(class_of(h), DestinationClass::Ambiguous, "{h}");
+        }
+        for h in [
+            "prod-db.example.com",
+            "db.prod.internal",
+            "app-prd-1.example.com",
+            "primary.example.com",
+            "live-db.example.com",
+        ] {
+            assert_eq!(class_of(h), DestinationClass::Production, "{h}");
+        }
+    }
+
+    #[test]
+    fn not_production_clears_a_false_positive() {
+        let conn = Connection {
+            url: "mysql://u:p@dev-db.abc.us-east-1.rds.amazonaws.com/app".into(),
+            allow_destination: true,
+            production: false,
+            not_production: true,
+        };
+        assert_eq!(
+            classify_destination(&conn.url, &conn).unwrap(),
+            DestinationClass::Ambiguous
         );
     }
 

@@ -85,6 +85,10 @@ pub struct Connection {
     /// Explicitly mark this connection as production (writes always refused).
     #[serde(default)]
     pub production: bool,
+    /// Override for a host the name heuristics wrongly flag as production
+    /// (e.g. a dev database on RDS). `production: true` still wins.
+    #[serde(default)]
+    pub not_production: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
