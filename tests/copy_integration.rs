@@ -511,3 +511,75 @@ async fn deep_parent_filters_use_ctes_and_stay_correct() {
     assert_eq!(summary.estimated_rows["d"], Some(1));
     assert_eq!(summary.estimated_rows["c"], Some(1));
 }
+
+/// Page with batch_size 1 so every row boundary exercises the keyset compare.
+async fn assert_pages_completely(name: &str, ddl: &str, insert: &str, count_expected: i64) {
+    let Some(fx) = Fixture::new(name, &format!("{ddl} {insert}"), ddl).await else {
+        return;
+    };
+    for mode in ["merge", "replace"] {
+        let yaml = fx.yaml(
+            "  batch_size: 1",
+            &format!("mode: {mode}\ntables:\n  t: {{}}\n"),
+        );
+        fx.sync(&yaml, mode == "replace", false).await.unwrap();
+        assert_eq!(
+            count(&fx.dst, "SELECT COUNT(*) FROM t").await,
+            count_expected,
+            "{name} {mode}"
+        );
+        assert_eq!(
+            dump(&fx.src, "t", "k").await,
+            dump(&fx.dst, "t", "k").await,
+            "{name} {mode}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pages_enum_key_in_index_order() {
+    // Index order (z, a, m) differs from alphabetical order.
+    assert_pages_completely(
+        "pageenum",
+        "CREATE TABLE t (k ENUM('z','a','m') NOT NULL PRIMARY KEY, v INT) ENGINE=InnoDB;",
+        "INSERT INTO t VALUES ('z',1),('a',2),('m',3);",
+        3,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn pages_set_key_in_bitmask_order() {
+    assert_pages_completely(
+        "pageset",
+        "CREATE TABLE t (k SET('z','a','m') NOT NULL PRIMARY KEY, v INT) ENGINE=InnoDB;",
+        "INSERT INTO t VALUES ('z',1),('a',2),('m',3),('z,a',4),('a,m',5);",
+        5,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn pages_decimal_key_without_precision_loss() {
+    // Neighbouring values that are equal once converted to a double.
+    assert_pages_completely(
+        "pagedec",
+        "CREATE TABLE t (k DECIMAL(30,10) NOT NULL PRIMARY KEY, v INT) ENGINE=InnoDB;",
+        "INSERT INTO t VALUES (1234567890123456789.0000000001,1),\
+         (1234567890123456789.0000000002,2),(1234567890123456789.0000000003,3);",
+        3,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn pages_temporal_keys_with_fractional_seconds() {
+    assert_pages_completely(
+        "pagedt",
+        "CREATE TABLE t (k DATETIME(6) NOT NULL PRIMARY KEY, v INT) ENGINE=InnoDB;",
+        "INSERT INTO t VALUES ('2024-01-01 00:00:00.000001',1),\
+         ('2024-01-01 00:00:00.000002',2),('2024-01-01 00:00:00.000003',3);",
+        3,
+    )
+    .await;
+}

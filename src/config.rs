@@ -2,7 +2,6 @@ use crate::error::{DumplingError, Result};
 use indexmap::IndexMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -192,8 +191,15 @@ impl Config {
     }
 
     pub fn parse_yaml(raw: &str) -> Result<Self> {
-        let interpolated = interpolate_env(raw)?;
-        let config: Config = serde_yaml::from_str(&interpolated)
+        // Interpolate the parsed tree, not the raw text: placeholders in
+        // comments are ignored, and substituted values can never alter the
+        // YAML structure (a password containing `#` or `: ` stays a string).
+        let mut value: serde_yaml::Value = serde_yaml::from_str(raw)
+            .map_err(|e| DumplingError::Config(format!("invalid YAML configuration: {e}")))?;
+        let mut missing = Vec::new();
+        interpolate_value(&mut value, &mut missing);
+        missing_vars_error(missing)?;
+        let config: Config = serde_yaml::from_value(value)
             .map_err(|e| DumplingError::Config(format!("invalid YAML configuration: {e}")))?;
         config.validate_structure()?;
         Ok(config)
@@ -362,34 +368,47 @@ fn env_pattern() -> &'static Regex {
 /// Replace `${VAR}` placeholders. Missing variables are errors (never silently empty).
 pub fn interpolate_env(input: &str) -> Result<String> {
     let mut missing = Vec::new();
-    let mut cache: HashMap<String, String> = HashMap::new();
-    let out = env_pattern()
-        .replace_all(input, |caps: &regex::Captures| {
-            let key = &caps[1];
-            if let Some(v) = cache.get(key) {
-                return v.clone();
-            }
-            match env::var(key) {
-                Ok(v) => {
-                    cache.insert(key.to_string(), v.clone());
-                    v
-                }
-                Err(_) => {
-                    missing.push(key.to_string());
-                    caps[0].to_string()
-                }
+    let out = interpolate_str(input, &mut missing);
+    missing_vars_error(missing)?;
+    Ok(out)
+}
+
+fn interpolate_str(input: &str, missing: &mut Vec<String>) -> String {
+    env_pattern()
+        .replace_all(input, |caps: &regex::Captures| match env::var(&caps[1]) {
+            Ok(v) => v,
+            Err(_) => {
+                missing.push(caps[1].to_string());
+                caps[0].to_string()
             }
         })
-        .into_owned();
-    if !missing.is_empty() {
-        missing.sort();
-        missing.dedup();
-        return Err(DumplingError::Config(format!(
-            "missing environment variable(s): {}",
-            missing.join(", ")
-        )));
+        .into_owned()
+}
+
+/// Interpolate every string scalar (map keys are left alone).
+fn interpolate_value(value: &mut serde_yaml::Value, missing: &mut Vec<String>) {
+    use serde_yaml::Value;
+    match value {
+        Value::String(s) => *s = interpolate_str(s, missing),
+        Value::Sequence(items) => items.iter_mut().for_each(|v| interpolate_value(v, missing)),
+        Value::Mapping(map) => map
+            .iter_mut()
+            .for_each(|(_, v)| interpolate_value(v, missing)),
+        Value::Tagged(t) => interpolate_value(&mut t.value, missing),
+        _ => {}
     }
-    Ok(out)
+}
+
+fn missing_vars_error(mut missing: Vec<String>) -> Result<()> {
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort();
+    missing.dedup();
+    Err(DumplingError::Config(format!(
+        "missing environment variable(s): {}",
+        missing.join(", ")
+    )))
 }
 
 pub fn validate_mysql_url(url: &str) -> Result<()> {
@@ -463,6 +482,29 @@ mod tests {
         let out = interpolate_env("url: ${DUMPLING_TEST_URL}").unwrap();
         assert!(out.contains("mysql://u:p@localhost/db"));
         unsafe { env::remove_var("DUMPLING_TEST_URL") };
+    }
+
+    const MINIMAL: &str = "version: 1\nconnections:\n  local:\n    url: ";
+
+    #[test]
+    fn placeholders_in_comments_are_ignored() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { env::remove_var("DUMPLING_TEST_OLD") };
+        let yaml = format!("# url: ${{DUMPLING_TEST_OLD}}\n{MINIMAL}mysql://u@localhost/db\n");
+        Config::parse_yaml(&yaml).unwrap();
+    }
+
+    #[test]
+    fn special_characters_in_values_do_not_break_yaml() {
+        let _g = ENV_LOCK.lock().unwrap();
+        unsafe { env::set_var("DUMPLING_TEST_VAL", "x # y: \"z' {") };
+        let yaml = format!(
+            "{MINIMAL}mysql://u@localhost/db\ntables:\n  t:\n    where: name = '${{DUMPLING_TEST_VAL}}'\n"
+        );
+        let cfg = Config::parse_yaml(&yaml);
+        unsafe { env::remove_var("DUMPLING_TEST_VAL") };
+        let cfg = cfg.unwrap();
+        assert_eq!(cfg.tables["t"].filter(), Some("name = 'x # y: \"z' {'"));
     }
 
     #[test]

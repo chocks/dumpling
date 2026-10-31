@@ -284,6 +284,7 @@ impl CopyEngine<'_> {
         }
         // Paging key values come from the same result row.
         let mut key_slots = Vec::new();
+        let (mut key_lhs, mut key_rhs) = (Vec::new(), Vec::new());
         for k in &key {
             let idx = columns.iter().position(|(n, _)| n == k).ok_or_else(|| {
                 DumplingError::Validation(format!("key column `{table}.{k}` is not shared"))
@@ -291,7 +292,17 @@ impl CopyEngine<'_> {
             let (Some(s), ColumnSource::Read { kind, .. }) = (slot[idx], &columns[idx].1) else {
                 unreachable!("key columns are always read, never transformed");
             };
-            key_slots.push((s, *kind));
+            let col = info.column(k).expect("key column exists");
+            let (lhs, rhs) = value::key_compare(col);
+            if value::key_reads_as_number(col) {
+                // The copied value is the label; page by the numeric value.
+                key_slots.push((selects.len(), Kind::UInt));
+                selects.push(lhs.clone());
+            } else {
+                key_slots.push((s, *kind));
+            }
+            key_lhs.push(lhs);
+            key_rhs.push(rhs);
         }
         Ok(TablePlan {
             name,
@@ -300,8 +311,9 @@ impl CopyEngine<'_> {
             columns,
             selects,
             slot,
-            key,
             key_slots,
+            key_lhs,
+            key_rhs,
         })
     }
 
@@ -315,14 +327,9 @@ impl CopyEngine<'_> {
         send: &mpsc::Sender<Message>,
     ) -> Result<()> {
         let table = plan.name;
-        let order = plan
-            .key
-            .iter()
-            .map(|c| quote_ident(c))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let order = plan.key_lhs.join(", ");
         let tuple = format!("({order})");
-        let marks = format!("({})", vec!["?"; plan.key.len()].join(", "));
+        let marks = format!("({})", plan.key_rhs.join(", "));
         let filter = self
             .plan
             .effective_where
@@ -441,8 +448,10 @@ struct TablePlan<'a> {
     columns: Vec<(String, ColumnSource)>,
     selects: Vec<String>,
     slot: Vec<Option<usize>>,
-    key: Vec<String>,
     key_slots: Vec<(usize, Kind)>,
+    /// Per key column: expression to order/compare by, and its bind placeholder.
+    key_lhs: Vec<String>,
+    key_rhs: Vec<String>,
 }
 
 /// VIRTUAL/STORED GENERATED columns cannot be written (MySQL error 3105).
