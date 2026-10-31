@@ -481,6 +481,37 @@ async fn cross_schema_foreign_key_is_not_matched_to_local_table() {
     assert!(schema.tables["orders"].foreign_keys.is_empty());
 }
 
+#[tokio::test]
+async fn deep_parent_filters_use_ctes_and_stay_correct() {
+    // grandparent <- parent <- child, plus a second path child -> other -> grandparent.
+    let ddl = "CREATE TABLE gp (id INT PRIMARY KEY, ok TINYINT NOT NULL) ENGINE=InnoDB;
+        CREATE TABLE p (id INT PRIMARY KEY, gp_id INT NOT NULL, FOREIGN KEY (gp_id) REFERENCES gp (id)) ENGINE=InnoDB;
+        CREATE TABLE o (id INT PRIMARY KEY, gp_id INT NOT NULL, FOREIGN KEY (gp_id) REFERENCES gp (id)) ENGINE=InnoDB;
+        CREATE TABLE c (id INT PRIMARY KEY, p_id INT NOT NULL, o_id INT NOT NULL,
+          FOREIGN KEY (p_id) REFERENCES p (id), FOREIGN KEY (o_id) REFERENCES o (id)) ENGINE=InnoDB;
+        CREATE TABLE d (id INT PRIMARY KEY, c_id INT NOT NULL, FOREIGN KEY (c_id) REFERENCES c (id)) ENGINE=InnoDB;";
+    let seed = "INSERT INTO gp VALUES (1,1),(2,0);
+        INSERT INTO p VALUES (10,1),(20,2);
+        INSERT INTO o VALUES (100,1),(200,2);
+        INSERT INTO c VALUES (1000,10,100),(1001,20,100),(1002,10,200);
+        INSERT INTO d VALUES (1,1000),(2,1001),(3,1002);";
+    let Some(fx) = Fixture::new("ctefilter", &format!("{ddl} {seed}"), ddl).await else {
+        return;
+    };
+    let yaml = fx.yaml(
+        "  batch_size: 1",
+        "mode: merge\ntables:\n  gp: { where: \"ok = 1\" }\n  p: {}\n  o: {}\n  c: {}\n  d: {}\n",
+    );
+    fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(ids(&fx.dst, "gp").await, vec![1]);
+    assert_eq!(ids(&fx.dst, "c").await, vec![1000]);
+    assert_eq!(ids(&fx.dst, "d").await, vec![1]);
+    // The dry run counts with the same WITH clause.
+    let summary = fx.sync(&yaml, false, true).await.unwrap();
+    assert_eq!(summary.estimated_rows["d"], Some(1));
+    assert_eq!(summary.estimated_rows["c"], Some(1));
+}
+
 /// Page with batch_size 1 so every row boundary exercises the keyset compare.
 async fn assert_pages_completely(name: &str, ddl: &str, insert: &str, count_expected: i64) {
     let Some(fx) = Fixture::new(name, &format!("{ddl} {insert}"), ddl).await else {
