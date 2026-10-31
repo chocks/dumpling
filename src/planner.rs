@@ -464,6 +464,7 @@ mod tests {
                 url: "mysql://u@127.0.0.1/src".into(),
                 allow_destination: false,
                 production: true,
+                not_production: false,
             },
         );
         connections.insert(
@@ -472,6 +473,7 @@ mod tests {
                 url: "mysql://u@127.0.0.1/dst".into(),
                 allow_destination: true,
                 production: false,
+                not_production: false,
             },
         );
         ResolvedConfig {

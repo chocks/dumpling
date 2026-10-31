@@ -20,6 +20,7 @@ environment, and a missing variable is an error.
 | `connections.<name>.url` | `mysql://` URL, usually `${ENV}` |
 | `connections.<name>.production` | Writes are always refused |
 | `connections.<name>.allow_destination` | Explicit opt-in to write here |
+| `connections.<name>.not_production` | Clear a false "looks like production" host match (e.g. a dev DB on RDS). `production: true` still wins |
 | `source`, `destination` | Connection names |
 | `environments.<name>` | `{source, destination}` pair for `--env` |
 | `mode` | `merge` (default) or `replace` |
