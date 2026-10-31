@@ -447,3 +447,36 @@ async fn merge_into_pk_only_table_ignores_duplicates() {
     fx.sync(&yaml, false, false).await.unwrap();
     assert_eq!(count(&fx.dst, "SELECT COUNT(*) FROM links").await, 2);
 }
+
+#[tokio::test]
+async fn functional_unique_index_does_not_break_introspection() {
+    let ddl = "CREATE TABLE t (id INT PRIMARY KEY, name VARCHAR(20), \
+               UNIQUE KEY uq_lower ((LOWER(name)))) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::new(
+        "funcidx",
+        &format!("{ddl} INSERT INTO t VALUES (1,'a'),(2,'b');"),
+        ddl,
+    )
+    .await
+    else {
+        return;
+    };
+    let yaml = fx.yaml("", "mode: merge\ntables:\n  t: {}\n");
+    fx.sync(&yaml, false, false).await.unwrap();
+    assert_eq!(ids(&fx.dst, "t").await, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn cross_schema_foreign_key_is_not_matched_to_local_table() {
+    // `users` exists locally, but the FK points at another schema's `users`.
+    let sql = "DROP DATABASE IF EXISTS dt_xs_other; CREATE DATABASE dt_xs_other; \
+               CREATE TABLE dt_xs_other.users (id INT PRIMARY KEY) ENGINE=InnoDB; \
+               CREATE TABLE users (id INT PRIMARY KEY) ENGINE=InnoDB; \
+               CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, \
+               FOREIGN KEY (user_id) REFERENCES dt_xs_other.users (id)) ENGINE=InnoDB;";
+    let Some(fx) = Fixture::new("xschema", sql, "SELECT 1").await else {
+        return;
+    };
+    let schema = dumpling::db::introspect::introspect(&fx.src).await.unwrap();
+    assert!(schema.tables["orders"].foreign_keys.is_empty());
+}

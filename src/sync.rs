@@ -81,11 +81,21 @@ pub async fn run_sync(resolved: &ResolvedConfig, reporter: &Reporter) -> Result<
 /// proxies), and `mode: replace` would then wipe the source. Compare what the
 /// servers report about themselves rather than trusting the URLs.
 async fn assert_different_databases(source: &db::MySqlPool, dest: &db::MySqlPool) -> Result<()> {
-    async fn identity(pool: &db::MySqlPool) -> Result<(String, Option<String>)> {
-        sqlx::query_as("SELECT @@server_uuid, DATABASE()")
+    // `@@server_uuid` does not exist on MariaDB, and cloned servers can share
+    // a UUID, so identity is host + port (+ UUID where available) + schema.
+    type Identity = (String, u32, Option<String>, Option<String>);
+    async fn identity(pool: &db::MySqlPool) -> Result<Identity> {
+        let err = |e: sqlx::Error| DumplingError::Database(format!("identity check failed: {e}"));
+        let (host, port, schema): (String, u32, Option<String>) =
+            sqlx::query_as("SELECT @@hostname, @@port, DATABASE()")
+                .fetch_one(pool)
+                .await
+                .map_err(err)?;
+        let uuid: Option<String> = sqlx::query_scalar("SELECT @@server_uuid")
             .fetch_one(pool)
             .await
-            .map_err(|e| DumplingError::Database(format!("identity check failed: {e}")))
+            .ok();
+        Ok((host, port, uuid, schema))
     }
     if identity(source).await? == identity(dest).await? {
         return Err(DumplingError::Safety(
