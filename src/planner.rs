@@ -254,37 +254,70 @@ fn effective_filter(
     }
 }
 
+/// Sanity-check a table filter. Filters are trusted configuration, not a
+/// security boundary (the config author already controls the whole sync); this
+/// only catches accidents such as a stray `;` or a pasted statement.
+///
+/// The filter is scanned lexically: quoted strings and backticked identifiers
+/// are skipped, so `note = 'drop; table'` and a column named `` `update` `` are
+/// fine, while whitespace (including newlines/tabs) around keywords is
+/// irrelevant.
 fn validate_filter_expression(table: &str, filter: &str) -> Result<()> {
-    let lower = filter.to_ascii_lowercase();
-    // Defense in depth: reject obvious multi-statement / DDL injection in filters.
-    // Filters are trusted admin input, but we still block footguns.
-    let banned = [
-        ";",
-        "--",
-        "/*",
-        "*/",
-        " drop ",
-        " alter ",
-        " truncate ",
-        " insert ",
-        " update ",
-        " delete ",
-        " into ",
+    const STATEMENT_WORDS: &[&str] = &[
+        "drop", "alter", "truncate", "insert", "update", "delete", "into", "union",
     ];
-    for b in banned {
-        if lower.contains(b.trim()) && b != ";" {
-            // Allow words inside identifiers carefully — use crude check.
-            if lower.contains(b) {
-                return Err(DumplingError::Validation(format!(
-                    "filter on `{table}` contains disallowed SQL keyword/fragment `{b}`"
-                )));
+    let reject = |what: &str| {
+        Err(DumplingError::Validation(format!(
+            "filter on `{table}` must be a single expression: found {what}"
+        )))
+    };
+    let chars: Vec<char> = filter.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match c {
+            '\'' | '"' | '`' => {
+                // Skip a quoted run; a doubled quote or backslash escapes.
+                i += 1;
+                while i < chars.len() {
+                    if chars[i] == '\\' && c != '`' {
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == c {
+                        if chars.get(i + 1) == Some(&c) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
             }
+            ';' => return reject("a semicolon"),
+            '#' => return reject("a `#` comment"),
+            '/' if next == Some('*') => return reject("a `/*` comment"),
+            // MySQL only treats `--` as a comment when followed by whitespace
+            // (or the end), so `balance - -5` and `a--5` stay valid.
+            '-' if next == Some('-') && chars.get(i + 2).is_none_or(|c| c.is_whitespace()) => {
+                return reject("a `--` comment");
+            }
+            c if c.is_alphanumeric() || c == '_' || c == '$' => {
+                let start = i;
+                while i < chars.len()
+                    && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$')
+                {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect::<String>().to_lowercase();
+                if STATEMENT_WORDS.contains(&word.as_str()) {
+                    return reject(&format!("the keyword `{word}`"));
+                }
+            }
+            _ => i += 1,
         }
-    }
-    if filter.contains(';') {
-        return Err(DumplingError::Validation(format!(
-            "filter on `{table}` must be a single expression (no semicolons)"
-        )));
     }
     Ok(())
 }
@@ -518,8 +551,35 @@ mod tests {
     }
 
     #[test]
-    fn rejects_semicolon_in_filter() {
-        let err = validate_filter_expression("users", "id > 1; drop table users").unwrap_err();
-        assert!(err.to_string().contains("semicolon") || err.to_string().contains("disallowed"));
+    fn filter_rejects_statements_and_comments_regardless_of_whitespace() {
+        for f in [
+            "id > 1; drop table users",
+            "x=1\nUNION\tSELECT 1",
+            "x=1\nunion\nselect 1 into outfile 'f'",
+            "id > 1 -- trailing",
+            "id > 1 --",
+            "id > 1 /* c */",
+            "id > 1 # c",
+            "(DELETE)",
+        ] {
+            assert!(validate_filter_expression("t", f).is_err(), "{f:?}");
+        }
+    }
+
+    #[test]
+    fn filter_accepts_valid_expressions() {
+        for f in [
+            "balance - -5 > 0",
+            "a--5 > 0",
+            "created_at > NOW() - INTERVAL 1 DAY",
+            "note = 'drop; table -- /* # x'",
+            "name = 'it''s; fine'",
+            r"name = 'a\'; b'",
+            "`update` = 1 AND `into` IS NULL",
+            "update_time > '2024-01-01' AND deleted_at IS NULL AND dropship = 1",
+            "status IN ('a','b')\n  AND x = 1",
+        ] {
+            validate_filter_expression("t", f).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+        }
     }
 }
