@@ -93,12 +93,19 @@ integration tests call it.
 Checked in this order; `--force` only unlocks the last step.
 
 1. `production: true` on the destination connection → refuse, always.
-2. Host classification (loopback / well-known local names vs. `rds.amazonaws.com`,
-   `prod`, ...). Production-looking hosts → refuse. This is a backstop only.
+2. Host classification: loopback and well-known local names are local dev. Any
+   other host is split into words: `prod`, `prd`, `production` and the
+   managed-cloud domains (RDS, Cloud SQL, Azure Database, Google APIs) refuse;
+   `live`, `primary` and `aurora` refuse unless a dev-like word is present;
+   anything else is ambiguous and is allowed only when the destination is
+   explicitly approved. `not_production: true` clears a false positive. This is
+   a backstop only.
 3. `safe_destination` (default on) requires `allow_destination: true` on the
    destination connection.
-4. After connecting: the source and destination must not be the same database
-   (compares `@@server_uuid` + `DATABASE()`, so aliases and tunnels are caught).
+4. After connecting: the source and destination must not be the same database.
+   The check compares host name, port and current schema, plus `@@server_uuid`
+   when the server has one (MariaDB does not), so aliases and tunnels are
+   caught.
 5. `mode: replace` needs `--force`; non-interactive runs also need
    `DUMPLING_ALLOW_REPLACE=1`.
 
