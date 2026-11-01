@@ -137,9 +137,18 @@ interactive `replace` confirmation needs a terminal.
 
 ## Open items
 
-- Foreign-key cycles / self-referencing tables (rejected today)
-- Spatial column types
+- Foreign-key cycles / self-referencing tables (rejected today, #23)
+- Tables without a primary key or `NOT NULL` unique index (#24)
+- Spatial column types (#36)
+- Schema sync: create missing destination tables (#22)
+- Table wildcards and an `--exclude` flag (#26)
+- CLI row filters and group variables (#25)
+- Column rules that apply across tables (#28)
+- More transforms, including a custom SQL expression (#27)
+- Resumable batched sync for large append-only tables (#30)
+- Opt-in parallel table copy (`--jobs`, #31)
+- `list` command and a debug/SQL trace option (#29)
+- `init` framework presets (#32)
 - Structured filters instead of raw SQL `where`
-- TLS options are whatever the URL specifies; not covered by tests
-- Parallel table copy (would need one transaction per table, losing atomicity)
-- CI workflow
+- TLS options are whatever the URL specifies (#34)
+- The MariaDB integration suite is not in CI yet (#35)

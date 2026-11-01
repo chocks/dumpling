@@ -2,7 +2,11 @@
 
 Default file: `.dumpling.yml` (`dumpling init` writes a commented one; see also
 `.dumpling.example.yml`). Unknown keys are errors. `${VAR}` is replaced from the
-environment, and a missing variable is an error.
+environment after the YAML is parsed, so placeholders in comments are ignored
+and a substituted value never changes the document structure (a password with
+`#` or `: ` stays a string). A missing variable is an error. YAML syntax errors
+keep their line numbers; structure errors found after interpolation (missing or
+invalid typed fields) name the field but not a line number.
 
 **Precedence:** CLI flags (`--tables`, `--group`, `--env`, `--force`,
 `--dry-run`) > the selected `environments:` profile > top-level `source` /
@@ -44,9 +48,14 @@ copied. Otherwise every table not in `exclude` is copied.
 ## Filters
 
 `where` is inserted into `SELECT .. WHERE (..)` as written, so keep it a single
-boolean expression. Filters containing `;`, comments or statement keywords
-(`drop`, `insert`, ...) are rejected. A filter on a parent table also restricts
-its children, so the copy never contains a dangling foreign key.
+boolean expression. The filter is scanned lexically. Quoted strings and
+backticked identifiers are skipped, so `note = 'drop; table'` and a column named
+`` `update` `` are accepted. Outside them the scan rejects a `;`, a `#` or `/*`
+comment, `--` when a whitespace character or the end follows it, and the
+keywords `drop`, `alter`, `truncate`, `insert`, `update`, `delete`, `into` and
+`union` (case-insensitive, at word boundaries; whitespace around a keyword does
+not matter). A filter on a parent table also restricts its children, so the copy
+never contains a dangling foreign key.
 
 ## Transforms
 
@@ -94,12 +103,21 @@ How replacements are chosen:
 Checked in order. `--force` only affects the last step.
 
 1. A destination with `production: true` is never written.
-2. Hosts that look like production (RDS, Cloud SQL, Azure, names containing
-   `prod`, ...) are refused. This is a backstop, not the main protection.
+2. The host name is split into words. `prod`, `prd` and `production` refuse
+   immediately, as do managed-cloud domains (RDS, Cloud SQL, Azure Database,
+   Google APIs). `live`, `primary` and `aurora` refuse unless the host also has
+   a dev-like word (`dev`, `development`, `test`, `qa`, `local`, `sandbox`,
+   `ci`). Splitting on punctuation means `product-dev` does not match `prod`.
+   Other hosts are ambiguous and are allowed only when the destination is
+   explicitly approved (step 3). `not_production: true` clears a false positive,
+   while `production: true` still wins. This is a backstop, not the main
+   protection.
 3. With `safe_destination` (default), the destination needs
    `allow_destination: true`.
-4. After connecting, source and destination must be different databases
-   (server UUID + schema), which catches aliases and tunnels.
+4. After connecting, source and destination must be different databases. The
+   check compares the server's host name, port and current schema, plus the
+   server UUID when the server reports one (`@@server_uuid` is absent on
+   MariaDB), so aliases and tunnels are caught.
 5. `mode: replace` needs `--force` (and `DUMPLING_ALLOW_REPLACE=1` when not
    interactive).
 
@@ -126,9 +144,12 @@ verification is not disabled by default.
 
 - The destination schema must exist. Only columns present on both sides are
   copied; others are skipped with a warning.
+- Generated columns (virtual or stored) are skipped when the source is read.
 - Foreign-key cycles and self-referencing tables are rejected.
 - Spatial column types are unsupported. Tables with no primary key or `NOT NULL`
   unique index are unsupported.
+- Deep restricted-parent chains are planned with CTEs, so those plans need MySQL
+  8.0+ or MariaDB 10.2+.
 - The run is one destination transaction, atomic for InnoDB. DDL and
   non-transactional engines cannot be rolled back.
 - All tables are read from one consistent snapshot; a very long copy keeps
